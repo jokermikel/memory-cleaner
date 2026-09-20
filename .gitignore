@@ -13,6 +13,11 @@ launch.log
 *.bak
 README.old.md
 
+# ── 项目制作过程文档（只留在本地，不上传 GitHub）──
+PROGRESS.md
+内存清理应用_实施计划.md
+磁盘清理模块_实施计划.md
+
 # ── 依赖与缓存 ──
 node_modules/
 .DS_Store
