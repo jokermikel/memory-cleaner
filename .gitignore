@@ -1,0 +1,23 @@
+# ── 运行时生成物（含真实用户名/进程清单，绝不上传）──
+# build.js 每次运行重新采集生成的内存快照
+内存清理助手.html
+data/snapshot.json
+
+# ── 审计日志与启动日志（含本机路径/时间戳）──
+logs/
+*.log
+launch.log
+
+# ── 工具自动备份（带时间戳的 .bak 副本）──
+*.2026-*-*Z
+*.bak
+README.old.md
+
+# ── 依赖与缓存 ──
+node_modules/
+.DS_Store
+
+# ── 环境变量（若后续引入密钥，一律不提交）──
+.env
+.env.*
+!.env.example

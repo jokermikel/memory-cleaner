@@ -1,0 +1,372 @@
+{
+  "_meta": {
+    "说明": "磁盘路径 → 应用名映射。pathPrefix 相对于盘符或绝对路径，按最长前缀优先匹配。",
+    "更新": "2026-09-18 本机实测"
+  },
+  "maps": [
+    {
+      "prefix": "D:\\steam",
+      "name": "Steam 游戏库",
+      "purpose": "Steam 安装的游戏本体",
+      "category": "游戏",
+      "vendor": "Valve"
+    },
+    {
+      "prefix": "D:\\Steam++",
+      "name": "Watt Toolkit",
+      "purpose": "Steam++ 加速工具",
+      "category": "工具",
+      "vendor": "BeyondDimension"
+    },
+    {
+      "prefix": "D:\\youxi",
+      "name": "游戏目录 youxi",
+      "purpose": "D 盘游戏合集目录（非 Steam）",
+      "category": "游戏",
+      "vendor": "本地"
+    },
+    {
+      "prefix": "D:\\SeasunMechaBREAKCN",
+      "name": "解限机",
+      "purpose": "Seasun 解限机游戏客户端",
+      "category": "游戏",
+      "vendor": "Seasun"
+    },
+    {
+      "prefix": "D:\\Gamfs_BrownDust II",
+      "name": "棕色尘埃 2",
+      "purpose": "Brown Dust II 游戏文件",
+      "category": "游戏",
+      "vendor": "Neowiz"
+    },
+    {
+      "prefix": "D:\\BrownDust2mod",
+      "name": "棕色尘埃 2 模组",
+      "purpose": "Brown Dust II 模组管理",
+      "category": "游戏",
+      "vendor": "第三方"
+    },
+    {
+      "prefix": "D:\\Ollama",
+      "name": "Ollama 模型",
+      "purpose": "本地大模型运行时与模型文件",
+      "category": "开发",
+      "vendor": "Ollama"
+    },
+    {
+      "prefix": "D:\\anaconda",
+      "name": "Anaconda",
+      "purpose": "Python 科学计算发行版",
+      "category": "开发",
+      "vendor": "Anaconda"
+    },
+    {
+      "prefix": "D:\\Doubao",
+      "name": "豆包",
+      "purpose": "豆包桌面客户端安装目录",
+      "category": "工具",
+      "vendor": "字节跳动"
+    },
+    {
+      "prefix": "D:\\douyin",
+      "name": "抖音",
+      "purpose": "抖音电脑版安装目录",
+      "category": "娱乐",
+      "vendor": "北京微播视界"
+    },
+    {
+      "prefix": "D:\\Thunder",
+      "name": "迅雷",
+      "purpose": "迅雷安装目录",
+      "category": "工具",
+      "vendor": "迅雷"
+    },
+    {
+      "prefix": "D:\\Weixin",
+      "name": "微信",
+      "purpose": "微信电脑版安装目录",
+      "category": "社交",
+      "vendor": "Tencent"
+    },
+    {
+      "prefix": "D:\\JianyingPro",
+      "name": "剪映专业版",
+      "purpose": "剪映视频剪辑",
+      "category": "工具",
+      "vendor": "字节跳动"
+    },
+    {
+      "prefix": "D:\\IntelliJ IDEA 2025.3.1.1",
+      "name": "IntelliJ IDEA",
+      "purpose": "JetBrains Java IDE",
+      "category": "开发",
+      "vendor": "JetBrains"
+    },
+    {
+      "prefix": "D:\\pycharm",
+      "name": "PyCharm",
+      "purpose": "JetBrains Python IDE",
+      "category": "开发",
+      "vendor": "JetBrains"
+    },
+    {
+      "prefix": "D:\\Microsoft VS Code",
+      "name": "VS Code",
+      "purpose": "Visual Studio Code",
+      "category": "开发",
+      "vendor": "Microsoft"
+    },
+    {
+      "prefix": "D:\\closecode",
+      "name": "CloseCode",
+      "purpose": "本智能体安装目录",
+      "category": "工具",
+      "vendor": "DoCode Platform"
+    },
+    {
+      "prefix": "D:\\LenovoSoftstore",
+      "name": "联想应用商店软件",
+      "purpose": "联想商店安装的第三方软件（含夸克等）",
+      "category": "工具",
+      "vendor": "Lenovo"
+    },
+    {
+      "prefix": "D:\\BaiduNetdisk",
+      "name": "百度网盘",
+      "purpose": "百度网盘客户端",
+      "category": "工具",
+      "vendor": "百度"
+    },
+    {
+      "prefix": "D:\\DingDing",
+      "name": "钉钉",
+      "purpose": "钉钉客户端",
+      "category": "办公",
+      "vendor": "阿里巴巴"
+    },
+    {
+      "prefix": "D:\\deepseek",
+      "name": "DeepSeek",
+      "purpose": "DeepSeek 相关文件",
+      "category": "工具",
+      "vendor": "DeepSeek"
+    },
+    {
+      "prefix": "D:\\Neowiz",
+      "name": "Neowiz 游戏",
+      "purpose": "Neowiz 平台游戏文件",
+      "category": "游戏",
+      "vendor": "Neowiz"
+    },
+    {
+      "prefix": "D:\\Drivers",
+      "name": "驱动备份",
+      "purpose": "驱动安装包备份",
+      "category": "系统",
+      "vendor": "本地"
+    },
+    {
+      "prefix": "D:\\WPS Office",
+      "name": "WPS 办公",
+      "purpose": "WPS Office 安装目录",
+      "category": "办公",
+      "vendor": "金山"
+    },
+    {
+      "prefix": "D:\\iFlyIME",
+      "name": "讯飞输入法",
+      "purpose": "讯飞输入法安装目录",
+      "category": "工具",
+      "vendor": "科大讯飞"
+    },
+    {
+      "prefix": "D:\\gopeed",
+      "name": "Gopeed",
+      "purpose": "Gopeed 下载器",
+      "category": "工具",
+      "vendor": "Gopeed"
+    },
+    {
+      "prefix": "D:\\Oppo Connect",
+      "name": "OPPO 互联",
+      "purpose": "O+ Connect 安装目录",
+      "category": "工具",
+      "vendor": "OPPO"
+    },
+    {
+      "prefix": "D:\\CloudMusic",
+      "name": "网易云音乐",
+      "purpose": "网易云音乐",
+      "category": "娱乐",
+      "vendor": "网易"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Google\\Play Games",
+      "name": "Google Play 游戏",
+      "purpose": "Google Play Games 模拟器及安卓游戏数据",
+      "category": "游戏",
+      "vendor": "Google"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Google\\Chrome",
+      "name": "Chrome 浏览器",
+      "purpose": "Chrome 用户数据",
+      "category": "浏览器",
+      "vendor": "Google"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\NVIDIA",
+      "name": "NVIDIA 着色器缓存",
+      "purpose": "显卡 DirectX/OpenGL 着色器缓存",
+      "category": "驱动",
+      "vendor": "NVIDIA"
+    },
+    {
+      "prefix": "%APPDATA%\\Tencent",
+      "name": "腾讯全家桶数据",
+      "purpose": "微信/QQ/腾讯视频的用户数据与缓存",
+      "category": "社交",
+      "vendor": "Tencent"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Tencent",
+      "name": "腾讯本地缓存",
+      "purpose": "腾讯应用本地缓存",
+      "category": "社交",
+      "vendor": "Tencent"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Doubao",
+      "name": "豆包用户数据",
+      "purpose": "豆包客户端缓存与用户数据",
+      "category": "工具",
+      "vendor": "字节跳动"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Quark",
+      "name": "夸克浏览器数据",
+      "purpose": "夸克用户数据和缓存",
+      "category": "浏览器",
+      "vendor": "阿里巴巴"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Steam",
+      "name": "Steam 本地缓存",
+      "purpose": "Steam 商店页与客户端缓存",
+      "category": "游戏",
+      "vendor": "Valve"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Microsoft",
+      "name": "微软本地数据",
+      "purpose": "Edge、Office、OneDrive 等微软应用数据",
+      "category": "系统",
+      "vendor": "Microsoft"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Packages",
+      "name": "微软商店应用数据",
+      "purpose": "UWP / Microsoft Store 应用数据包",
+      "category": "系统",
+      "vendor": "Microsoft"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Temp",
+      "name": "用户临时文件",
+      "purpose": "各应用运行临时文件",
+      "category": "临时文件",
+      "vendor": "系统"
+    },
+    {
+      "prefix": "%LOCALAPPDATA%\\Programs",
+      "name": "用户级安装程序",
+      "purpose": "当前用户安装的程序（非 Program Files）",
+      "category": "工具",
+      "vendor": "多个"
+    },
+    {
+      "prefix": "%USERPROFILE%\\Documents",
+      "name": "文档",
+      "purpose": "用户文档文件夹（可能含游戏存档/工程文件）",
+      "category": "用户文件",
+      "vendor": "用户"
+    },
+    {
+      "prefix": "%USERPROFILE%\\Downloads",
+      "name": "下载",
+      "purpose": "浏览器下载目录",
+      "category": "用户文件",
+      "vendor": "用户"
+    },
+    {
+      "prefix": "%USERPROFILE%\\Videos",
+      "name": "视频",
+      "purpose": "用户视频文件夹",
+      "category": "用户文件",
+      "vendor": "用户"
+    },
+    {
+      "prefix": "%USERPROFILE%\\.ollama",
+      "name": "Ollama 用户数据",
+      "purpose": "Ollama 模型与配置",
+      "category": "开发",
+      "vendor": "Ollama"
+    },
+    {
+      "prefix": "%USERPROFILE%\\.codex",
+      "name": "Codex 数据",
+      "purpose": "OpenAI Codex / 编码代理数据",
+      "category": "开发",
+      "vendor": "OpenAI"
+    },
+    {
+      "prefix": "%USERPROFILE%\\.cache",
+      "name": "开发工具缓存",
+      "purpose": "Hugging Face 等开发缓存",
+      "category": "开发",
+      "vendor": "多个"
+    },
+    {
+      "prefix": "%USERPROFILE%\\.docker",
+      "name": "Docker 数据",
+      "purpose": "Docker 桌面端数据",
+      "category": "开发",
+      "vendor": "Docker"
+    },
+    {
+      "prefix": "%USERPROFILE%\\Saved Games",
+      "name": "游戏存档",
+      "purpose": "Windows 标准游戏存档目录",
+      "category": "游戏",
+      "vendor": "多个"
+    },
+    {
+      "prefix": "C:\\Windows",
+      "name": "Windows 系统",
+      "purpose": "操作系统文件",
+      "category": "系统",
+      "vendor": "Microsoft"
+    },
+    {
+      "prefix": "C:\\Program Files",
+      "name": "已安装程序 (64位)",
+      "purpose": "系统级 64 位软件安装目录",
+      "category": "系统",
+      "vendor": "多个"
+    },
+    {
+      "prefix": "C:\\Program Files (x86)",
+      "name": "已安装程序 (32位)",
+      "purpose": "系统级 32 位软件安装目录",
+      "category": "系统",
+      "vendor": "多个"
+    },
+    {
+      "prefix": "C:\\ProgramData",
+      "name": "程序公共数据",
+      "purpose": "所有用户共享的程序数据",
+      "category": "系统",
+      "vendor": "多个"
+    }
+  ]
+}

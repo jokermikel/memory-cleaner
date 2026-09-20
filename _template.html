@@ -1,0 +1,1196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>内存清理助手 · 本机内存体检</title>
+<style>
+  :root {
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --text: #0f172a;
+    --text-2: #475569;
+    --text-3: #94a3b8;
+    --border: #e2e8f0;
+    --primary: #3b82f6;
+    --primary-soft: #eff6ff;
+    --safe: #10b981;
+    --safe-soft: #ecfdf5;
+    --caution: #f59e0b;
+    --caution-soft: #fffbeb;
+    --protected: #ef4444;
+    --protected-soft: #fef2f2;
+    --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --text: #f1f5f9;
+      --text-2: #cbd5e1;
+      --text-3: #64748b;
+      --border: #334155;
+      --primary: #60a5fa;
+      --primary-soft: #1e3a5f;
+      --safe: #34d399;
+      --safe-soft: #064e3b;
+      --caution: #fbbf24;
+      --caution-soft: #451a03;
+      --protected: #f87171;
+      --protected-soft: #450a0a;
+      --shadow: 0 1px 3px rgba(0,0,0,0.4);
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 24px 16px 48px;
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+
+  header { margin-bottom: 24px; }
+  header h1 {
+    font-size: 24px; font-weight: 700;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    display: inline-block;
+  }
+  header .sub { color: var(--text-2); font-size: 13px; margin-top: 4px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .badge {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-2);
+  }
+  .badge.warn { background: var(--caution-soft); color: var(--caution); border-color: transparent; }
+  .badge.ok { background: var(--safe-soft); color: var(--safe); border-color: transparent; }
+  .header-tools { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .btn-elevate {
+    padding: 6px 14px; border-radius: 8px; border: 1px solid transparent;
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    color: #fff; font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-elevate:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(217,119,6,0.35); }
+  .btn-elevate:disabled { opacity: 0.55; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn-elevate.is-admin {
+    background: var(--safe-soft); color: var(--safe); border: 1px solid var(--safe);
+  }
+  .elevate-msg {
+    font-size: 12px; color: var(--text-2);
+    padding: 6px 10px; border-radius: 8px; background: var(--primary-soft);
+    display: none;
+  }
+  .elevate-msg.show { display: inline-block; }
+  .elevate-msg.warn { background: var(--caution-soft); color: var(--caution); }
+
+  /* 总览 */
+  .overview {
+    display: grid; gap: 16px; margin-bottom: 24px;
+    grid-template-columns: 320px 1fr;
+  }
+  @media (max-width: 768px) { .overview { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 20px;
+  }
+  .ring-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .ring-wrap svg { display: block; }
+  .ring-center { text-align: center; margin-top: -8px; }
+  .ring-center .pct { font-size: 28px; font-weight: 700; }
+  .ring-center .lbl { font-size: 12px; color: var(--text-3); }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .metric { padding: 12px; border-radius: 8px; background: var(--bg); }
+  .metric .v { font-size: 18px; font-weight: 700; }
+  .metric .k { font-size: 12px; color: var(--text-3); }
+  .modules { margin-top: 16px; }
+  .modules h3 { font-size: 14px; margin-bottom: 10px; color: var(--text-2); }
+  .module-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .module-card {
+    border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .module-icon { font-size: 24px; }
+  .module-info .m-name { font-weight: 600; font-size: 14px; }
+  .module-info .m-detail { font-size: 12px; color: var(--text-3); }
+
+  /* 控制栏 */
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    margin-bottom: 16px;
+  }
+  .search {
+    flex: 1; min-width: 200px; padding: 9px 14px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--card); color: var(--text); font-size: 14px;
+  }
+  .search:focus { outline: 2px solid var(--primary); border-color: transparent; }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; }
+  .sel-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    margin: 0 0 16px; padding: 10px 14px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: var(--shadow);
+  }
+  #diskAppSelBar { margin: 16px 0; }
+  .sel-bar .sel-all { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+  .sel-bar .sel-all input { width: 16px; height: 16px; accent-color: var(--primary); }
+  .sel-bar .sel-summary { flex: 1; min-width: 180px; font-size: 13px; color: var(--text-2); }
+  .sel-bar .sel-summary strong { color: var(--primary); }
+  .filter-btn {
+    padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text-2); font-size: 13px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .filter-btn:hover { transform: translateY(-1px); }
+  .filter-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+  /* 应用列表 */
+  .app-list { display: flex; flex-direction: column; gap: 8px; }
+  .app-row {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px;
+    display: grid; grid-template-columns: 28px 1fr auto; gap: 12px;
+    align-items: start;
+    cursor: default; transition: box-shadow 0.15s, border-color 0.15s;
+  }
+  .app-row:hover { box-shadow: var(--shadow); }
+  .app-row.expandable { cursor: pointer; }
+  .app-row.is-picked { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+  .app-check { display: flex; align-items: flex-start; padding-top: 4px; }
+  .app-check input {
+    width: 16px; height: 16px; accent-color: var(--primary); cursor: pointer;
+  }
+  .app-check input:disabled { cursor: not-allowed; opacity: 0.35; }
+  .app-main { min-width: 0; }
+  .app-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .app-name { font-weight: 600; font-size: 15px; }
+  .risk-tag {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500;
+  }
+  .risk-safe { background: var(--safe-soft); color: var(--safe); }
+  .risk-caution { background: var(--caution-soft); color: var(--caution); }
+  .risk-protected { background: var(--protected-soft); color: var(--protected); }
+  .app-purpose { font-size: 12px; color: var(--text-2); margin-top: 3px; }
+  .app-meta { font-size: 11px; color: var(--text-3); margin-top: 3px; }
+  .app-side { display: flex; align-items: center; gap: 16px; }
+  .app-mem { text-align: right; }
+  .app-mem .m { font-weight: 700; font-size: 15px; white-space: nowrap; }
+  .app-mem .p { font-size: 11px; color: var(--text-3); }
+  .mem-bar { width: 120px; height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+  .mem-bar i { display: block; height: 100%; border-radius: 4px; }
+  .bar-safe { background: var(--safe); }
+  .bar-caution { background: var(--caution); }
+  .bar-protected { background: var(--protected); }
+  .expand-hint { font-size: 11px; color: var(--primary); }
+  @media (max-width: 768px) {
+    .app-side { flex-direction: column; align-items: flex-end; gap: 4px; }
+    .mem-bar { width: 80px; }
+  }
+
+  /* 展开的子进程 */
+  .app-children {
+    grid-column: 2 / -1; border-top: 1px dashed var(--border);
+    padding-top: 10px; margin-top: 4px; display: none;
+  }
+  .app-children.open { display: block; }
+  .child-row {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 4px 8px; font-size: 12px; border-radius: 4px;
+  }
+  .child-row:nth-child(odd) { background: var(--bg); }
+  .child-name { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .child-mem { color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+  footer { margin-top: 24px; font-size: 12px; color: var(--text-3); }
+
+  /* 清理面板 */
+  .cleanup-panel {
+    margin-top: 24px; background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px;
+  }
+  .cleanup-head { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .cleanup-head h2 { font-size: 18px; font-weight: 700; }
+  .cleanup-sub { font-size: 12px; color: var(--text-2); margin-top: 4px; max-width: 520px; }
+  .cleanup-actions { display: flex; gap: 8px; }
+  .btn {
+    padding: 9px 16px; border-radius: 8px; border: 1px solid var(--border);
+    font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+  }
+  .btn:hover:not(:disabled) { transform: translateY(-1px); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .btn-danger { background: var(--protected); color: #fff; border-color: var(--protected); }
+  .btn-ghost { background: var(--card); color: var(--text-2); }
+  .cleanup-body { margin-top: 16px; }
+  .cleanup-hint {
+    font-size: 13px; color: var(--text-3); text-align: center; padding: 24px;
+    border: 1px dashed var(--border); border-radius: 8px;
+  }
+  .pick-row {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px;
+  }
+  .pick-row input { width: 16px; height: 16px; accent-color: var(--primary); cursor: pointer; }
+  .pick-info { flex: 1; min-width: 0; }
+  .pick-name { font-weight: 600; font-size: 14px; }
+  .pick-purpose { font-size: 12px; color: var(--text-3); }
+  .pick-mem { font-weight: 700; font-size: 14px; white-space: nowrap; }
+  .cleanup-summary {
+    margin-top: 12px; padding: 12px 16px; border-radius: 8px;
+    background: var(--caution-soft); color: var(--text); font-size: 13px;
+  }
+  .cleanup-summary strong { color: var(--caution); }
+  .cleanup-result { margin-top: 16px; padding: 16px; border-radius: 8px; font-size: 13px; }
+  .result-ok { background: var(--safe-soft); }
+  .result-warn { background: var(--caution-soft); }
+  .result-detail { margin-top: 8px; font-size: 12px; color: var(--text-2); }
+  .compare { display: flex; align-items: center; gap: 12px; margin: 10px 0; font-size: 15px; font-weight: 700; }
+  .compare .arrow { color: var(--text-3); }
+  .compare .after { color: var(--safe); }
+  .ro-note {
+    margin-top: 12px; font-size: 12px; color: var(--text-3);
+    background: var(--bg); padding: 10px 12px; border-radius: 8px;
+  }
+  .tabs { display: flex; gap: 8px; margin: 16px 0 20px; }
+  .tab-btn {
+    padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text-2); font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .tab-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .drive-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .drive-card h3 { font-size: 16px; margin-bottom: 6px; }
+  .drive-bar { height: 10px; border-radius: 5px; background: var(--border); overflow: hidden; margin: 8px 0; }
+  .drive-bar i { display: block; height: 100%; background: var(--primary); }
+  #diskView { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🧹 内存清理助手</h1>
+    <div class="sub" id="subline">正在加载…</div>
+    <div class="header-tools">
+      <div class="badges" id="badges"></div>
+      <button type="button" class="btn-elevate" id="btnElevate" hidden>🛡️ 提升权限</button>
+      <span class="elevate-msg" id="elevateMsg"></span>
+    </div>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="ram">运行内存</button>
+      <button class="tab-btn" data-tab="disk">磁盘</button>
+    </div>
+  </header>
+
+  <div id="ramView">
+  <section class="overview">
+    <div class="card ring-wrap">
+      <div id="ring"></div>
+      <div class="ring-center">
+        <div class="pct" id="usedPct">--</div>
+        <div class="lbl">已用内存</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="metrics" id="metrics"></div>
+      <div class="modules">
+        <h3>物理内存条</h3>
+        <div class="module-grid" id="modules"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="controls">
+    <input class="search" id="search" type="text" placeholder="搜索应用名、用途、厂商…">
+    <div class="filters" id="filters">
+      <button class="filter-btn active" data-risk="all">全部</button>
+      <button class="filter-btn" data-risk="safe">🟢 可清理</button>
+      <button class="filter-btn" data-risk="caution">🟡 谨慎</button>
+      <button class="filter-btn" data-risk="protected">🔴 保护</button>
+    </div>
+  </div>
+
+  <div class="sel-bar" id="ramSelBar">
+    <label class="sel-all"><input type="checkbox" id="chkAllSafe"> 全选可清理</label>
+    <span class="sel-summary" id="ramSelSummary">勾选应用后可在此结束进程。🔴 保护项无法勾选。</span>
+    <button class="btn btn-ghost" id="btnRamClear" type="button">清除勾选</button>
+    <button class="btn btn-danger" id="btnRamKill" type="button" disabled>结束已选应用</button>
+  </div>
+
+  <div class="app-list" id="appList"></div>
+  <div class="cleanup-result" id="ramSelResult" style="display:none"></div>
+
+  <footer id="footer"></footer>
+
+  <!-- 清理面板（仅在通过服务打开时可用） -->
+  <section class="cleanup-panel" id="cleanupPanel" style="display:none">
+    <div class="cleanup-head">
+      <div>
+        <h2>🧹 一键清理</h2>
+        <p class="cleanup-sub">勾选要关闭的应用，先看计划再执行。清理会关闭程序，未保存的内容会丢失。</p>
+      </div>
+      <div class="cleanup-actions">
+        <button class="btn btn-ghost" id="btnPlan">生成清理计划</button>
+        <button class="btn btn-primary" id="btnExec" disabled>确认执行清理</button>
+      </div>
+    </div>
+
+    <div class="cleanup-body" id="cleanupBody"></div>
+
+    <div class="cleanup-result" id="cleanupResult" style="display:none"></div>
+  </section>
+  </div>
+
+  <div id="diskView">
+    <div class="drive-grid" id="driveGrid">
+      <div class="card">正在读取 C/D 盘容量…</div>
+    </div>
+    <section class="cleanup-panel">
+      <div class="cleanup-head">
+        <div>
+          <h2>💾 磁盘垃圾清理</h2>
+          <p class="cleanup-sub">只清理词典白名单里的缓存/临时文件。微信聊天、文档、游戏本体不会出现在默认可清列表。</p>
+        </div>
+        <div class="cleanup-actions">
+          <button class="btn btn-ghost" id="btnDiskJunk">扫描可清理垃圾</button>
+          <button class="btn btn-ghost" id="btnDiskApps">按应用看占用（较慢）</button>
+          <button class="btn btn-primary" id="btnDiskExec" disabled>确认删除勾选项</button>
+        </div>
+      </div>
+      <div class="cleanup-body" id="diskJunkBody">
+        <div class="cleanup-hint">点「扫描可清理垃圾」查看分类清单（约 3 秒）。点「按应用看占用」会扫 30~60 秒。</div>
+      </div>
+      <div class="cleanup-result" id="diskResult" style="display:none"></div>
+    </section>
+    <div class="sel-bar" id="diskAppSelBar" style="display:none">
+      <span class="sel-summary" id="diskAppSelSummary">勾选应用后，只会清理其白名单缓存，不会删除安装目录、游戏或文档。</span>
+      <button class="btn btn-ghost" id="btnDiskAppClear" type="button">清除勾选</button>
+      <button class="btn btn-danger" id="btnDiskAppDel" type="button" disabled>删除已选缓存</button>
+    </div>
+    <div class="app-list" id="diskAppList"></div>
+  </div>
+</div>
+
+<script>
+const DATA = __SNAPSHOT_DATA__;
+</script>
+<script>
+(function(){
+  'use strict';
+  const MB = 1048576, GB = 1024**3;
+  function fmt(b){
+    if(b >= GB) return (b/GB).toFixed(2)+' GB';
+    if(b >= MB) return (b/MB).toFixed(1)+' MB';
+    return b+' B';
+  }
+  const riskLabel = { safe:'🟢 可清理', caution:'🟡 谨慎', protected:'🔴 保护' };
+  const riskCls = { safe:'risk-safe', caution:'risk-caution', protected:'risk-protected' };
+  const barCls = { safe:'bar-safe', caution:'bar-caution', protected:'bar-protected' };
+
+  let snapshot = DATA;
+  let s = snapshot.system;
+  let apps = snapshot.apps;
+  const ramPicked = new Set();
+
+  function paintOverview(){
+    document.getElementById('subline').textContent =
+      '采集于 ' + new Date(s.collectedAt).toLocaleString('zh-CN') +
+      ' · 主机 ' + s.hostName + ' · ' + snapshot.processCount + ' 个进程 → ' + apps.length + ' 个应用';
+
+    const used = s.usedBytes, total = s.totalVisibleBytes;
+    const pct = s.usedPercent;
+    document.getElementById('usedPct').textContent = pct + '%';
+    const R = 80, C = 2*Math.PI*R;
+    const frac = total ? used/total : 0;
+    document.getElementById('ring').innerHTML =
+      '<svg width="200" height="200" viewBox="0 0 200 200">' +
+      '<circle cx="100" cy="100" r="'+R+'" fill="none" stroke="var(--border)" stroke-width="20"/>' +
+      '<circle cx="100" cy="100" r="'+R+'" fill="none" stroke="var(--primary)" stroke-width="20" stroke-linecap="round" ' +
+      'stroke-dasharray="'+C+'" stroke-dashoffset="'+(C*(1-frac))+'" transform="rotate(-90 100 100)"/>' +
+      '</svg>';
+
+    const metrics = [
+      ['已用', fmt(used), '物理内存已占用'],
+      ['可用', fmt(s.availableBytes), '含待机缓存（任务管理器口径）'],
+      ['提交', fmt(s.commitUsedBytes)+' / '+fmt(s.commitLimitBytes), '虚拟内存提交量 '+(s.commitUsedPercent||0)+'%'],
+      ['待机缓存', fmt(s.standbyCacheBytes), '清理可腾出空间，但可能拖慢程序'],
+    ];
+    document.getElementById('metrics').innerHTML = metrics.map(m =>
+      '<div class="metric"><div class="v">'+m[1]+'</div><div class="k">'+m[0]+' · '+m[2]+'</div></div>'
+    ).join('');
+
+    document.getElementById('modules').innerHTML = (s.modules||[]).map(m =>
+      '<div class="module-card"><div class="module-icon">💾</div>' +
+      '<div class="module-info"><div class="m-name">' + fmt(m.capacityBytes) + ' ' + (m.manufacturer||'') + '</div>' +
+      '<div class="m-detail">' + m.bank + ' · DDR' + m.speedMhz + '（实跑 ' + (m.configuredSpeedMhz||m.speedMhz) + '）' +
+      (m.partNumber ? ' · ' + m.partNumber : '') + '</div></div></div>'
+    ).join('') || '<div class="metric"><div class="k">未读到内存条信息</div></div>';
+
+    const safeTotal = apps.filter(a => a.risk==='safe').reduce((sum,a)=>sum+a.workingSetBytes,0);
+    document.getElementById('footer').textContent =
+      '归组守恒 ' + (snapshot.conserved ? '✓ 通过' : '✗ 失败') +
+      '（归组前 ' + fmt(snapshot.totalBytes) + ' = 归组后 ' + fmt(snapshot.groupedBytes) + '）' +
+      ' · 可安全清理合计 ' + fmt(safeTotal);
+  }
+
+  function applySnapshot(data){
+    if(!data || !data.system || !Array.isArray(data.apps)) return;
+    snapshot = data;
+    s = data.system;
+    apps = data.apps;
+    const live = new Set(apps.map(a => a.key));
+    Array.from(ramPicked).forEach(k => { if(!live.has(k)) ramPicked.delete(k); });
+    paintOverview();
+  }
+
+  async function refreshSnapshot(){
+    try {
+      const data = await (await fetch('/api/memory/snapshot', { cache:'no-store' })).json();
+      applySnapshot(data);
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  // 权限徽章（快照时的状态；实时状态由提权按钮根据 /api/privilege/status 覆盖）
+  const badges = document.getElementById('badges');
+  const b1 = document.createElement('span');
+  b1.id = 'adminBadge';
+  b1.className = 'badge' + (s.isAdmin ? ' ok' : ' warn');
+  b1.textContent = s.isAdmin ? '以管理员运行' : '普通权限运行';
+  badges.appendChild(b1);
+  if(DATA.accessLimitedCount > 0){
+    const b2 = document.createElement('span');
+    b2.className = 'badge warn';
+    b2.textContent = DATA.accessLimitedCount + ' 个进程读不到路径（可提权提升）';
+    badges.appendChild(b2);
+  }
+
+  // ============ 提升权限 ============
+  (function initElevate(){
+    const btn = document.getElementById('btnElevate');
+    const msg = document.getElementById('elevateMsg');
+    const badge = document.getElementById('adminBadge');
+    if(!btn || !msg) return;
+
+    function setMsg(text, warn){
+      msg.textContent = text || '';
+      msg.classList.toggle('show', !!text);
+      msg.classList.toggle('warn', !!warn);
+    }
+
+    function applyStatus(st){
+      if(!st) return;
+      if(badge){
+        badge.textContent = st.isAdmin ? '以管理员运行' : '普通权限运行';
+        badge.classList.toggle('ok', !!st.isAdmin);
+        badge.classList.toggle('warn', !st.isAdmin);
+      }
+      if(st.isAdmin){
+        btn.hidden = false;
+        btn.disabled = true;
+        btn.classList.add('is-admin');
+        btn.textContent = '✓ 已是管理员';
+      } else if(st.canElevate){
+        btn.hidden = false;
+        btn.disabled = false;
+        btn.classList.remove('is-admin');
+        btn.textContent = '🛡️ 提升权限';
+      } else {
+        btn.hidden = true;
+      }
+    }
+
+    fetch('/api/privilege/status')
+      .then(r => r.ok ? r.json() : null)
+      .then(st => { applyStatus(st); })
+      .catch(() => { btn.hidden = true; });
+
+    async function waitForAdmin(timeoutMs){
+      const start = Date.now();
+      while(Date.now() - start < timeoutMs){
+        await new Promise(r => setTimeout(r, 800));
+        try {
+          const st = await (await fetch('/api/privilege/status', { cache:'no-store' })).json();
+          if(st && st.isAdmin) return st;
+        } catch(e) { /* 旧服务关掉、新服务还没起来，继续等 */ }
+      }
+      return null;
+    }
+
+    btn.addEventListener('click', async () => {
+      if(btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '正在请求提权…';
+      setMsg('将弹出 Windows 用户账户控制，请点击「是」。');
+      try {
+        const r = await (await fetch('/api/privilege/elevate', {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({})
+        })).json();
+        if(r.error){
+          setMsg('提权失败：' + r.error.message, true);
+          btn.disabled = false;
+          btn.textContent = '🛡️ 提升权限';
+          return;
+        }
+        if(r.alreadyAdmin){
+          applyStatus({ isAdmin:true, canElevate:false });
+          setMsg(r.message || '当前已是管理员权限');
+          return;
+        }
+        setMsg(r.message || '请在 UAC 窗口点击「是」，服务将以管理员身份重启。');
+        const st = await waitForAdmin(90000);
+        if(st){
+          applyStatus(st);
+          setMsg('提权成功，正在刷新数据…');
+          setTimeout(() => location.reload(), 600);
+        } else {
+          setMsg('未检测到管理员服务。若在 UAC 点了「否」，权限不会变化；点了「是」请稍候再刷新本页。', true);
+          btn.disabled = false;
+          btn.textContent = '🛡️ 提升权限';
+        }
+      } catch(e) {
+        setMsg('请求失败：' + e.message + '。若已点「是」，新服务可能正在启动，请稍后刷新。', true);
+        btn.disabled = false;
+        btn.textContent = '🛡️ 提升权限';
+      }
+    });
+  })();
+
+  paintOverview();
+
+  // 应用列表
+  const listEl = document.getElementById('appList');
+  let curRisk = 'all', curQ = '', showAll = false;
+  const DEFAULT_SHOW = 30;
+  let lastVisibleApps = [];
+  let ramServiceMode = false;
+  const btnRamKill = document.getElementById('btnRamKill');
+  const btnRamClear = document.getElementById('btnRamClear');
+  const ramSelSummary = document.getElementById('ramSelSummary');
+  const chkAllSafe = document.getElementById('chkAllSafe');
+  const ramSelResult = document.getElementById('ramSelResult');
+
+  fetch('/api/health').then(r => r.ok ? r.json() : null).then(d => {
+    ramServiceMode = !!(d && d.status === 'ok');
+    if(!ramServiceMode){
+      ramSelSummary.textContent = '当前是本地文件模式。要用勾选删除，请运行 启动.bat 后从 http://127.0.0.1:7788/ 打开。';
+      btnRamKill.disabled = true;
+    } else {
+      updateRamSel();
+    }
+  }).catch(() => {
+    ramSelSummary.textContent = '当前是本地文件模式。要用勾选删除，请运行 启动.bat 后从 http://127.0.0.1:7788/ 打开。';
+    btnRamKill.disabled = true;
+  });
+
+  function isRamCheckable(a){ return a.risk !== 'protected'; }
+
+  function updateRamSel(){
+    const chosen = apps.filter(a => ramPicked.has(a.key));
+    const bytes = chosen.reduce((s,a)=>s+a.workingSetBytes,0);
+    const procs = chosen.reduce((s,a)=>s+(a.processCount||0),0);
+    const cautionN = chosen.filter(a => a.risk==='caution').length;
+    if(!ramServiceMode){
+      btnRamKill.disabled = true;
+      return;
+    }
+    if(!chosen.length){
+      ramSelSummary.innerHTML = '勾选应用后可在此结束进程。🔴 保护项无法勾选。';
+    } else {
+      ramSelSummary.innerHTML = '已选 <strong>'+chosen.length+'</strong> 个应用（'+procs+' 个进程），预计释放 <strong>'+fmt(bytes)+'</strong>' +
+        (cautionN ? ' · 含 <strong>'+cautionN+'</strong> 个谨慎项，未保存内容可能丢失' : '');
+    }
+    btnRamKill.disabled = chosen.length === 0;
+    const visSafe = lastVisibleApps.filter(a => a.risk === 'safe');
+    const visSafePicked = visSafe.filter(a => ramPicked.has(a.key));
+    chkAllSafe.checked = visSafe.length > 0 && visSafePicked.length === visSafe.length;
+    chkAllSafe.indeterminate = visSafePicked.length > 0 && visSafePicked.length < visSafe.length;
+  }
+
+  function render(){
+    let list = apps;
+    if(curRisk !== 'all') list = list.filter(a => a.risk === curRisk);
+    if(curQ){
+      const q = curQ.toLowerCase();
+      list = list.filter(a =>
+        (a.name||'').toLowerCase().includes(q) ||
+        (a.purpose||'').toLowerCase().includes(q) ||
+        (a.vendor||'').toLowerCase().includes(q));
+    }
+    const totalCount = list.length;
+    const showingAll = showAll || curQ || curRisk !== 'all';
+    const visible = showingAll ? list : list.slice(0, DEFAULT_SHOW);
+    lastVisibleApps = visible;
+    const maxWs = visible.length ? visible[0].workingSetBytes : 1;
+    if(!visible.length){
+      listEl.innerHTML = '<div class="card" style="text-align:center;color:var(--text-3)">无匹配应用</div>';
+      updateRamSel();
+      return;
+    }
+    listEl.innerHTML = visible.map(a => {
+      const pctStr = s.totalVisibleBytes ? (a.workingSetBytes/s.totalVisibleBytes*100).toFixed(1) : '0';
+      const expandable = a.groupBehavior === 'expand' && a.processes && a.processes.length > 0;
+      const children = expandable
+        ? '<div class="app-children" data-children="1">' + a.processes.map(p =>
+            '<div class="child-row"><span class="child-name">'+p.name+' (PID '+p.pid+')'+(p.path?' · '+p.path:'')+'</span>' +
+            '<span class="child-mem">'+fmt(p.workingSet)+'</span></div>').join('') + '</div>'
+        : '';
+      const checkable = isRamCheckable(a);
+      const checked = ramPicked.has(a.key);
+      return '<div class="app-row'+(expandable?' expandable':'')+(checked?' is-picked':'')+'" data-key="'+a.key+'">' +
+        '<label class="app-check">' +
+          '<input type="checkbox" data-key="'+a.key+'"'+(checkable?'':' disabled title="系统保护进程，禁止结束"')+(checked?' checked':'')+'>' +
+        '</label>' +
+        '<div class="app-main">' +
+          '<div class="app-title"><span class="app-name">'+a.name+'</span>' +
+          '<span class="risk-tag '+riskCls[a.risk]+'">'+riskLabel[a.risk]+'</span>' +
+          (expandable ? '<span class="expand-hint">▸ 展开 '+a.processCount+' 个服务</span>' : '') + '</div>' +
+          '<div class="app-purpose">'+a.purpose+'</div>' +
+          '<div class="app-meta">'+a.category+' · '+a.vendor+' · '+a.processCount+' 个进程' +
+          (a.riskReason && a.risk!=='caution' ? ' · '+a.riskReason : '') + '</div>' +
+        '</div>' +
+        '<div class="app-side">' +
+          '<div class="mem-bar"><i class="'+barCls[a.risk]+'" style="width:'+(a.workingSetBytes/maxWs*100)+'%"></i></div>' +
+          '<div class="app-mem"><div class="m">'+fmt(a.workingSetBytes)+'</div><div class="p">'+pctStr+'%</div></div>' +
+        '</div>' + children + '</div>';
+    }).join('');
+
+    // 显示全部按钮
+    if(!showingAll && totalCount > DEFAULT_SHOW){
+      const btn = document.createElement('div');
+      btn.className = 'card';
+      btn.style.cssText = 'text-align:center;color:var(--primary);cursor:pointer;font-weight:600;padding:14px';
+      btn.textContent = '▾ 显示全部 ' + totalCount + ' 个应用（当前只显示前 ' + DEFAULT_SHOW + ' 个）';
+      btn.addEventListener('click', () => { showAll = true; render(); });
+      listEl.appendChild(btn);
+    }
+
+    listEl.querySelectorAll('.app-check').forEach(lab => {
+      lab.addEventListener('click', e => e.stopPropagation());
+    });
+    listEl.querySelectorAll('.app-check input').forEach(cb => {
+      cb.addEventListener('change', () => {
+        if(cb.disabled) return;
+        if(cb.checked) ramPicked.add(cb.dataset.key); else ramPicked.delete(cb.dataset.key);
+        const row = cb.closest('.app-row');
+        if(row) row.classList.toggle('is-picked', cb.checked);
+        updateRamSel();
+      });
+    });
+
+    // 绑定展开
+    listEl.querySelectorAll('.app-row.expandable').forEach(row => {
+      row.addEventListener('click', () => {
+        const c = row.querySelector('.app-children');
+        if(c) c.classList.toggle('open');
+        const hint = row.querySelector('.expand-hint');
+        if(hint) hint.textContent = c && c.classList.contains('open') ? '▾ 收起' : '▸ 展开 '+row.querySelectorAll('.child-row').length+' 个服务';
+      });
+    });
+    updateRamSel();
+  }
+
+  chkAllSafe.addEventListener('change', () => {
+    const visSafe = lastVisibleApps.filter(a => a.risk === 'safe');
+    if(chkAllSafe.checked) visSafe.forEach(a => ramPicked.add(a.key));
+    else visSafe.forEach(a => ramPicked.delete(a.key));
+    render();
+  });
+  btnRamClear.addEventListener('click', () => {
+    ramPicked.clear();
+    render();
+  });
+  btnRamKill.addEventListener('click', async () => {
+    const chosen = apps.filter(a => ramPicked.has(a.key));
+    if(!chosen.length) return;
+    const caution = chosen.filter(a => a.risk==='caution');
+    const bytes = chosen.reduce((s,a)=>s+a.workingSetBytes,0);
+    let msg = '确认结束 ' + chosen.length + ' 个应用？\n\n' +
+      chosen.map(a=>'· '+a.name+'  '+fmt(a.workingSetBytes)).join('\n') +
+      '\n\n预计释放 ' + fmt(bytes) + '\n未保存的内容会丢失。';
+    if(caution.length){
+      msg += '\n\n⚠ 含 '+caution.length+' 个谨慎项：' + caution.map(a=>a.name).join('、') + '。结束可能影响正在使用的程序。';
+    }
+    if(!confirm(msg)) return;
+    btnRamKill.disabled = true;
+    btnRamKill.textContent = '正在结束…';
+    ramSelResult.style.display = 'none';
+    try {
+      const r = await (await fetch('/api/cleanup/execute', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ appKeys: chosen.map(a=>a.key), dryRun:false, confirmed:true, force:true })
+      })).json();
+      ramSelResult.style.display = '';
+      if(r.error){
+        ramSelResult.className = 'cleanup-result result-warn';
+        ramSelResult.innerHTML = '<strong>执行被拒绝：</strong>' + r.error.message;
+      } else {
+        const ok = r.succeeded > 0;
+        ramSelResult.className = 'cleanup-result ' + (ok ? 'result-ok' : 'result-warn');
+        let html = ok
+          ? '<strong>已结束 ' + r.succeeded + ' / ' + r.requested + ' 个进程</strong>' +
+            '<div class="compare"><span>清理前 '+fmt(r.beforeUsedBytes)+'（'+r.beforePercent+'%）</span>' +
+            '<span class="arrow">→</span><span class="after">清理后 '+fmt(r.afterUsedBytes)+'（'+r.afterPercent+'%）</span></div>' +
+            '<div>实际释放 <strong>'+fmt(r.freedBytes)+'</strong></div>'
+          : '<strong>没有进程被成功关闭</strong><div style="margin-top:8px">'+(r.systemDeltaNote||'')+'</div>';
+        if(r.failReasons && Object.keys(r.failReasons).length){
+          html += '<div class="result-detail"><strong>失败原因：</strong><br>' +
+            Object.entries(r.failReasons).map(([k,v]) => '· '+k+'（'+v+' 个）').join('<br>') + '</div>';
+        }
+        ramSelResult.innerHTML = html;
+        ramPicked.clear();
+        await refreshSnapshot();
+        render();
+      }
+    } catch(e) {
+      ramSelResult.style.display = '';
+      ramSelResult.className = 'cleanup-result result-warn';
+      ramSelResult.innerHTML = '<strong>执行失败：</strong>' + e.message;
+    } finally {
+      btnRamKill.textContent = '结束已选应用';
+      updateRamSel();
+    }
+  });
+
+  // 筛选
+  document.getElementById('filters').addEventListener('click', e => {
+    const btn = e.target.closest('.filter-btn');
+    if(!btn) return;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    curRisk = btn.dataset.risk;
+    render();
+  });
+  // 搜索
+  let timer;
+  document.getElementById('search').addEventListener('input', e => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { curQ = e.target.value.trim(); render(); }, 150);
+  });
+
+  render();
+
+  // ============ 清理面板 ============
+  (function initCleanup(){
+    const panel = document.getElementById('cleanupPanel');
+    const body = document.getElementById('cleanupBody');
+    const resultBox = document.getElementById('cleanupResult');
+    const btnPlan = document.getElementById('btnPlan');
+    const btnExec = document.getElementById('btnExec');
+
+    // 检测是否为服务模式：能访问同源 API 才启用清理
+    let serviceMode = false;
+    fetch('/api/health', { method:'GET' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        serviceMode = !!(d && d.status === 'ok');
+        if(serviceMode){
+          panel.style.display = '';
+          const adminHint = (d && d.isAdmin)
+            ? ''
+            : '<div class="ro-note">当前是普通权限。结束系统服务、读取受保护进程路径需要管理员。点标题栏「提升权限」会弹出 UAC，确认后服务以管理员身份重启。</div>';
+          body.innerHTML = '<div class="cleanup-hint">点「生成清理计划」，查看哪些应用可以关闭、预计释放多少内存。</div>' + adminHint;
+        } else {
+          panel.style.display = '';
+          body.innerHTML = '<div class="cleanup-hint">当前是本地文件模式（只读）。<br>要用一键清理功能，请运行 <code>启动.bat</code> 或 <code>node server/server.js</code>，再从 http://127.0.0.1:7788/ 打开。</div>';
+          btnPlan.disabled = true;
+        }
+      })
+      .catch(() => {
+        panel.style.display = '';
+        body.innerHTML = '<div class="cleanup-hint">当前是本地文件模式（只读）。<br>要用一键清理功能，请运行 <code>启动.bat</code> 或 <code>node server/server.js</code>，再从 http://127.0.0.1:7788/ 打开。</div>';
+        btnPlan.disabled = true;
+      });
+
+    let currentPlan = null;
+    const picked = new Set();
+
+    btnPlan.addEventListener('click', async () => {
+      btnPlan.disabled = true;
+      btnPlan.textContent = '正在生成…';
+      try {
+        const list = await (await fetch('/api/cleanup/plan')).json();
+        currentPlan = list;
+        picked.clear();
+        list.apps.forEach(a => picked.add(a.key));
+        renderPlan(list);
+        btnExec.disabled = list.processCount === 0;
+      } catch(e) {
+        body.innerHTML = '<div class="cleanup-hint">生成计划失败：' + e.message + '</div>';
+      } finally {
+        btnPlan.disabled = false;
+        btnPlan.textContent = '重新生成计划';
+      }
+    });
+
+    function renderPlan(list){
+      if(!list.apps.length){
+        body.innerHTML = '<div class="cleanup-hint">没有找到可安全清理的应用。</div>';
+        return;
+      }
+      body.innerHTML =
+        list.apps.map(a =>
+          '<label class="pick-row">' +
+            '<input type="checkbox" checked data-key="'+a.key+'">' +
+            '<div class="pick-info"><div class="pick-name">'+a.name+'</div>' +
+            '<div class="pick-purpose">'+a.purpose+' · '+a.processCount+' 个进程</div></div>' +
+            '<div class="pick-mem">'+fmt(a.workingSetBytes)+'</div>' +
+          '</label>'
+        ).join('') +
+        '<div class="cleanup-summary" id="planSummary"></div>';
+
+      body.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        cb.addEventListener('change', () => {
+          if(cb.checked) picked.add(cb.dataset.key); else picked.delete(cb.dataset.key);
+          updateSummary(list);
+        });
+      });
+      updateSummary(list);
+    }
+
+    function updateSummary(list){
+      const chosen = list.apps.filter(a => picked.has(a.key));
+      const bytes = chosen.reduce((s,a)=>s+a.workingSetBytes,0);
+      const procs = chosen.reduce((s,a)=>s+a.processCount,0);
+      const el = document.getElementById('planSummary');
+      if(!el) return;
+      el.innerHTML = '将关闭 <strong>' + chosen.length + '</strong> 个应用（<strong>' + procs +
+        '</strong> 个进程），预计释放 <strong>' + fmt(bytes) + '</strong>。' +
+        '🔴 保护进程（' + list.blockedProtected.length + ' 个）已被自动排除，不会出现在列表中。';
+      btnExec.disabled = chosen.length === 0;
+    }
+
+    btnExec.addEventListener('click', async () => {
+      if(!currentPlan) return;
+      const chosen = currentPlan.apps.filter(a => picked.has(a.key));
+      const bytes = chosen.reduce((s,a)=>s+a.workingSetBytes,0);
+      if(!confirm('确认关闭 ' + chosen.length + ' 个应用？\n\n' +
+        chosen.map(a=>'· '+a.name).join('\n') +
+        '\n\n预计释放 ' + fmt(bytes) + '\n未保存的内容会丢失。')) return;
+
+      btnExec.disabled = true;
+      btnExec.textContent = '正在清理…';
+      try {
+        const r = await (await fetch('/api/cleanup/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ appKeys: chosen.map(a=>a.key), dryRun:false, confirmed:true, force:true })
+        })).json();
+
+        if(r.error){
+          resultBox.style.display = '';
+          resultBox.className = 'cleanup-result result-warn';
+          resultBox.innerHTML = '<strong>执行被拒绝：</strong>' + r.error.message;
+        } else {
+          renderResult(r);
+        }
+      } catch(e) {
+        resultBox.style.display = '';
+        resultBox.className = 'cleanup-result result-warn';
+        resultBox.innerHTML = '<strong>执行失败：</strong>' + e.message;
+      } finally {
+        btnExec.disabled = false;
+        btnExec.textContent = '确认执行清理';
+      }
+    });
+
+    function renderResult(r){
+      resultBox.style.display = '';
+      const anyFreed = r.succeeded > 0;
+      resultBox.className = 'cleanup-result ' + (anyFreed ? 'result-ok' : 'result-warn');
+      let html = '';
+      if(anyFreed){
+        html += '<strong>清理完成：成功关闭 ' + r.succeeded + ' / ' + r.requested + ' 个进程</strong>';
+        html += '<div class="compare"><span>清理前 ' + fmt(r.beforeUsedBytes) + '（' + r.beforePercent + '%）</span>' +
+                '<span class="arrow">→</span><span class="after">清理后 ' + fmt(r.afterUsedBytes) + '（' + r.afterPercent + '%）</span></div>';
+        html += '<div>实际释放 <strong>' + fmt(r.freedBytes) + '</strong></div>';
+      } else {
+        html += '<strong>没有进程被成功关闭</strong>';
+        html += '<div style="margin-top:8px">' + (r.systemDeltaNote || '') + '</div>';
+      }
+      if(r.failReasons && Object.keys(r.failReasons).length){
+        html += '<div class="result-detail"><strong>失败原因：</strong><br>' +
+          Object.entries(r.failReasons).map(([k,v]) => '· ' + k + '（' + v + ' 个）').join('<br>') + '</div>';
+      }
+      html += '<div class="result-detail">真实释放量只在进程确实退出后才上报；系统内存的自然波动不计入效果。</div>';
+      resultBox.innerHTML = html;
+      ramPicked.clear();
+      refreshSnapshot().then(() => render());
+    }
+  })();
+
+  // ============ 磁盘标签页 ============
+  (function initDisk(){
+    const ramView = document.getElementById('ramView');
+    const diskView = document.getElementById('diskView');
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const tab = btn.dataset.tab;
+        ramView.style.display = tab === 'ram' ? '' : 'none';
+        diskView.style.display = tab === 'disk' ? 'block' : 'none';
+        if(tab === 'disk') loadVolumes();
+      });
+    });
+
+    function loadVolumes(){
+      const grid = document.getElementById('driveGrid');
+      fetch('/api/disk/volumes').then(r=>r.json()).then(d => {
+        if(!d.drives) { grid.innerHTML = '<div class="card">请通过 启动.bat 打开服务后再查看磁盘</div>'; return; }
+        grid.innerHTML = d.drives.map(v => {
+          const pct = v.usedPercent || 0;
+          return '<div class="card drive-card"><h3>'+v.drive+' '+(v.volumeName||'')+'</h3>' +
+            '<div class="drive-bar"><i style="width:'+pct+'%"></i></div>' +
+            '<div>已用 '+fmt(v.usedBytes)+' / '+fmt(v.totalBytes)+'（'+pct+'%）</div>' +
+            '<div style="color:var(--text-3);font-size:12px">剩余 '+fmt(v.freeBytes)+' · '+ (v.fileSystem||'') +'</div></div>';
+        }).join('');
+      }).catch(() => {
+        grid.innerHTML = '<div class="card">无法连接服务。请运行 启动.bat 后从 http://127.0.0.1:7788/ 打开。</div>';
+      });
+    }
+
+    let junkPlan = null;
+    const pickedJunk = new Set();
+    const btnJunk = document.getElementById('btnDiskJunk');
+    const btnApps = document.getElementById('btnDiskApps');
+    const btnExec = document.getElementById('btnDiskExec');
+    const body = document.getElementById('diskJunkBody');
+    const resultBox = document.getElementById('diskResult');
+
+    function renderDiskCleanupResult(r){
+      resultBox.style.display = '';
+      if(r.error){
+        resultBox.className = 'cleanup-result result-warn';
+        resultBox.innerHTML = '<strong>被拒绝：</strong>'+r.error.message;
+        return;
+      }
+      const ok = (r.succeeded||0) > 0;
+      const skipped = r.skipped || 0;
+      const failed = r.failed || 0;
+      resultBox.className = 'cleanup-result '+(ok ? 'result-ok' : 'result-warn');
+      let title;
+      if(ok){
+        title = '删除完成：成功 '+r.succeeded+' / '+r.requested+' 个路径';
+      } else if(skipped && !failed){
+        title = '没有文件可删（目录已空）';
+      } else {
+        title = '没有文件被删除';
+      }
+      resultBox.innerHTML = '<strong>'+title+'</strong>' +
+        '<div>实际释放 <strong>'+fmt(r.freedBytes||0)+'</strong>'+(skipped ? ' · 跳过 '+skipped+' 个空目录' : '')+(failed ? ' · 失败 '+failed : '')+'</div>' +
+        (r.systemDeltaNote ? '<div class="result-detail">'+r.systemDeltaNote+'</div>' : '');
+    }
+
+    btnJunk.addEventListener('click', async () => {
+      btnJunk.disabled = true; btnJunk.textContent = '扫描中…';
+      try {
+        const d = await (await fetch('/api/disk/junk')).json();
+        junkPlan = d;
+        pickedJunk.clear();
+        d.items.filter(i => i.risk==='safe' && i.bytes>0).forEach(i => pickedJunk.add(i.id));
+        renderJunk(d);
+        btnExec.disabled = pickedJunk.size === 0;
+      } catch(e) {
+        body.innerHTML = '<div class="cleanup-hint">扫描失败：'+e.message+'</div>';
+      } finally {
+        btnJunk.disabled = false; btnJunk.textContent = '重新扫描垃圾';
+      }
+    });
+
+    function renderJunk(d){
+      const list = (d.items||[]).filter(i => i.bytes>0);
+      if(!list.length){ body.innerHTML = '<div class="cleanup-hint">没有发现可清理垃圾</div>'; return; }
+      body.innerHTML = list.map(i =>
+        '<label class="pick-row">' +
+          '<input type="checkbox" data-id="'+i.id+'" '+(i.risk==='safe'?'checked':'')+'>' +
+          '<div class="pick-info"><div class="pick-name">'+i.name+' <span class="risk-tag '+(i.risk==='safe'?'risk-safe':'risk-caution')+'">'+(i.risk==='safe'?'🟢可清':'🟡谨慎')+'</span></div>' +
+          '<div class="pick-purpose">'+i.purpose+'</div></div>' +
+          '<div class="pick-mem">'+fmt(i.bytes)+'</div></label>'
+      ).join('') + '<div class="cleanup-summary" id="junkSummary"></div>';
+      body.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        cb.addEventListener('change', () => {
+          if(cb.checked) pickedJunk.add(cb.dataset.id); else pickedJunk.delete(cb.dataset.id);
+          updateJunkSummary(d);
+        });
+      });
+      updateJunkSummary(d);
+    }
+
+    function updateJunkSummary(d){
+      const chosen = (d.items||[]).filter(i => pickedJunk.has(i.id));
+      const bytes = chosen.reduce((s,i)=>s+i.bytes,0);
+      const el = document.getElementById('junkSummary');
+      if(el) el.innerHTML = '已勾选 <strong>'+chosen.length+'</strong> 项，预计释放 <strong>'+fmt(bytes)+'</strong>。谨慎项含聊天记录，请自行确认。';
+      btnExec.disabled = chosen.length === 0;
+    }
+
+    btnExec.addEventListener('click', async () => {
+      if(!junkPlan) return;
+      const chosen = junkPlan.items.filter(i => pickedJunk.has(i.id));
+      const bytes = chosen.reduce((s,i)=>s+i.bytes,0);
+      if(!confirm('确认删除以下缓存/临时文件？\n\n'+chosen.map(i=>'· '+i.name+'  '+fmt(i.bytes)).join('\n')+'\n\n预计 '+fmt(bytes)+'\n只删白名单路径，文档和游戏不会动。')) return;
+      btnExec.disabled = true; btnExec.textContent = '正在删除…';
+      try {
+        const r = await (await fetch('/api/disk/cleanup/execute', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ ids: chosen.map(i=>i.id), dryRun:false, confirmed:true })
+        })).json();
+        renderDiskCleanupResult(r);
+        if(!r.error){
+          btnJunk.click();
+        }
+      } catch(e) {
+        resultBox.style.display = '';
+        resultBox.className = 'cleanup-result result-warn';
+        resultBox.innerHTML = '<strong>失败：</strong>'+e.message;
+      } finally {
+        btnExec.disabled = false; btnExec.textContent = '确认删除勾选项';
+      }
+    });
+
+    const diskAppSelBar = document.getElementById('diskAppSelBar');
+    const diskAppSelSummary = document.getElementById('diskAppSelSummary');
+    const btnDiskAppClear = document.getElementById('btnDiskAppClear');
+    const btnDiskAppDel = document.getElementById('btnDiskAppDel');
+    const diskAppPicked = new Set();
+    let diskAppData = [];
+
+    function junkForApp(app, items){
+      const dirs = (app.dirs || []).map(d => String(d.path || '').replace(/\\+$/,'').toLowerCase()).filter(Boolean);
+      if(!dirs.length) return [];
+      return (items || []).filter(i => {
+        if(i.risk !== 'safe' || !(i.bytes > 0)) return false;
+        return (i.paths || []).some(p => {
+          const exp = String(p.expanded || '').replace(/\\+$/,'').toLowerCase();
+          if(!exp) return false;
+          return dirs.some(dir => exp === dir || exp.startsWith(dir + '\\'));
+        });
+      });
+    }
+
+    function updateDiskAppSel(){
+      const chosen = diskAppData.filter(a => diskAppPicked.has(a.name));
+      const junkIds = new Set();
+      let junkBytes = 0;
+      const junkNames = [];
+      chosen.forEach(a => {
+        (a._junk || []).forEach(j => {
+          if(junkIds.has(j.id)) return;
+          junkIds.add(j.id);
+          junkBytes += j.bytes || 0;
+          junkNames.push(j.name);
+        });
+      });
+      if(!chosen.length){
+        diskAppSelSummary.innerHTML = '勾选应用后，只会清理其白名单缓存，不会删除安装目录、游戏或文档。';
+      } else {
+        diskAppSelSummary.innerHTML = '已选 <strong>'+chosen.length+'</strong> 个应用，对应 <strong>'+junkIds.size+'</strong> 项可清缓存，预计释放 <strong>'+fmt(junkBytes)+'</strong>。';
+      }
+      btnDiskAppDel.disabled = junkIds.size === 0;
+      return { junkIds: Array.from(junkIds), junkBytes, junkNames, chosen };
+    }
+
+    function renderDiskApps(){
+      const listEl = document.getElementById('diskAppList');
+      const visible = diskAppData.slice(0, 40);
+      if(!visible.length){
+        listEl.innerHTML = '<div class="cleanup-hint">没有扫到应用占用</div>';
+        diskAppSelBar.style.display = 'none';
+        return;
+      }
+      diskAppSelBar.style.display = '';
+      listEl.innerHTML = visible.map(a => {
+        const junk = a._junk || [];
+        const junkBytes = junk.reduce((s,j)=>s+(j.bytes||0),0);
+        const checkable = junk.length > 0 && junkBytes > 0;
+        const checked = diskAppPicked.has(a.name);
+        const tag = checkable
+          ? '<span class="risk-tag risk-safe">可清缓存 '+fmt(junkBytes)+'</span>'
+          : '<span class="risk-tag risk-protected">不可删（安装目录/用户文件）</span>';
+        return '<div class="app-row'+(checked?' is-picked':'')+'">' +
+          '<label class="app-check">' +
+            '<input type="checkbox" data-name="'+a.name.replace(/"/g,'&quot;')+'"'+(checkable?'':' disabled title="没有白名单缓存，安装目录和文档不会删"')+(checked?' checked':'')+'>' +
+          '</label>' +
+          '<div class="app-main"><div class="app-title"><span class="app-name">'+a.name+'</span>'+tag+'</div>' +
+          '<div class="app-purpose">'+a.purpose+'</div>' +
+          '<div class="app-meta">'+a.category+' · '+a.vendor+(checkable ? ' · 勾选后只删：'+junk.map(j=>j.name).join('、') : '')+'</div></div>' +
+          '<div class="app-side"><div class="app-mem"><div class="m">'+fmt(a.bytes)+'</div><div class="p">占用</div></div></div></div>';
+      }).join('');
+      listEl.querySelectorAll('.app-check input').forEach(cb => {
+        cb.addEventListener('change', () => {
+          if(cb.disabled) return;
+          if(cb.checked) diskAppPicked.add(cb.dataset.name); else diskAppPicked.delete(cb.dataset.name);
+          const row = cb.closest('.app-row');
+          if(row) row.classList.toggle('is-picked', cb.checked);
+          updateDiskAppSel();
+        });
+      });
+      updateDiskAppSel();
+    }
+
+    btnDiskAppClear.addEventListener('click', () => {
+      diskAppPicked.clear();
+      renderDiskApps();
+    });
+
+    btnDiskAppDel.addEventListener('click', async () => {
+      const sel = updateDiskAppSel();
+      if(!sel.junkIds.length) return;
+      if(!confirm('确认删除以下缓存/临时文件？\n\n'+sel.junkNames.map(n=>'· '+n).join('\n')+
+        '\n\n预计 '+fmt(sel.junkBytes)+'\n只删白名单路径，不会删除安装目录、游戏或文档。')) return;
+      btnDiskAppDel.disabled = true; btnDiskAppDel.textContent = '正在删除…';
+      try {
+        const r = await (await fetch('/api/disk/cleanup/execute', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ ids: sel.junkIds, dryRun:false, confirmed:true })
+        })).json();
+        renderDiskCleanupResult(r);
+        if(!r.error && r.succeeded>0){ diskAppPicked.clear(); renderDiskApps(); }
+      } catch(e) {
+        resultBox.style.display = '';
+        resultBox.className = 'cleanup-result result-warn';
+        resultBox.innerHTML = '<strong>失败：</strong>'+e.message;
+      } finally {
+        btnDiskAppDel.disabled = false; btnDiskAppDel.textContent = '删除已选缓存';
+        updateDiskAppSel();
+      }
+    });
+
+    btnApps.addEventListener('click', async () => {
+      btnApps.disabled = true; btnApps.textContent = '扫描中（30~60秒）…';
+      const listEl = document.getElementById('diskAppList');
+      listEl.innerHTML = '<div class="cleanup-hint">正在按应用归类 C/D 盘占用，请稍候…</div>';
+      diskAppSelBar.style.display = 'none';
+      try {
+        const [d, junk] = await Promise.all([
+          (await fetch('/api/disk/apps')).json(),
+          junkPlan ? Promise.resolve(junkPlan) : (await fetch('/api/disk/junk')).json()
+        ]);
+        if(!junkPlan) junkPlan = junk;
+        diskAppPicked.clear();
+        diskAppData = (d.apps || []).map(a => {
+          const matched = junkForApp(a, junk.items || []);
+          return Object.assign({}, a, { _junk: matched });
+        });
+        renderDiskApps();
+      } catch(e) {
+        listEl.innerHTML = '<div class="cleanup-hint">扫描失败：'+e.message+'</div>';
+      } finally {
+        btnApps.disabled = false; btnApps.textContent = '按应用看占用（较慢）';
+      }
+    });
+  })();
+})();
+</script>
+</body>
+</html>

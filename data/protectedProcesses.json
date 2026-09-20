@@ -1,0 +1,28 @@
+{
+  "_meta": {
+    "说明": "禁止结束的 Windows 系统关键进程清单。riskClassifier 第一步查这里，命中即判 protected。",
+    "来源": "微软官方文档列明的 Windows 系统关键进程（System/smss/csrss/wininit/winlogon/services/lsass/dwm 等）+ 本机实测验证",
+    "用途": "作为词典之外的第二道兜底：即使本机没运行的系统进程，将来出现时也能正确分级",
+    "更新日期": "2026-09-17"
+  },
+  "protected": [
+    { "name": "System", "reason": "Windows 内核进程，管理硬件与内存调度，不可结束", "source": "Microsoft 官方文档" },
+    { "name": "System Idle Process", "reason": "系统空闲进程，代表 CPU 未使用时间，不是真实进程", "source": "Microsoft 官方文档" },
+    { "name": "smss", "reason": "会话管理器，负责启动系统会话，结束会导致系统崩溃", "source": "Microsoft 官方文档" },
+    { "name": "csrss", "reason": "客户端/服务器运行时子系统，结束会导致蓝屏", "source": "Microsoft 官方文档" },
+    { "name": "wininit", "reason": "Windows 初始化进程，负责启动服务控制管理器等系统组件", "source": "Microsoft 官方文档" },
+    { "name": "winlogon", "reason": "Windows 登录进程，结束会导致系统退出登录", "source": "Microsoft 官方文档" },
+    { "name": "services", "reason": "服务控制管理器，管理所有 Windows 后台服务", "source": "Microsoft 官方文档" },
+    { "name": "lsass", "reason": "本地安全验证服务，结束会强制重启系统", "source": "Microsoft 官方文档" },
+    { "name": "svchost", "reason": "Windows 服务宿主，承载系统后台服务，结束会导致服务失效", "source": "Microsoft 官方文档" },
+    { "name": "dwm", "reason": "桌面窗口管理器，负责窗口渲染，结束会导致桌面黑屏", "source": "Microsoft 官方文档" },
+    { "name": "Registry", "reason": "注册表内核数据结构，保存系统与软件配置", "source": "Microsoft 官方文档" },
+    { "name": "Memory Compression", "reason": "系统内存压缩组件，结束会导致系统内存管理异常", "source": "Microsoft 官方文档" },
+    { "name": "Secure System", "reason": "Windows 安全内核（基于虚拟化的安全），隔离保护敏感数据", "source": "Microsoft 官方文档" },
+    { "name": "fontdrvhost", "reason": "字体驱动宿主，结束会导致文字渲染异常", "source": "Microsoft 官方文档" },
+    { "name": "MsMpEng", "reason": "Windows Defender 反恶意软件引擎，结束等于关闭实时防护", "source": "Microsoft 官方文档" },
+    { "name": "NisSrv", "reason": "Windows Defender 网络检查服务，提供网络层防护", "source": "Microsoft 官方文档" },
+    { "name": "SecurityHealthService", "reason": "Windows 安全中心服务，管理安全状态监控", "source": "Microsoft 官方文档" },
+    { "name": "SecurityHealthSystray", "reason": "Windows 安全中心托盘，显示安全状态通知", "source": "Microsoft 官方文档" }
+  ]
+}
