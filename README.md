@@ -16,14 +16,33 @@
 
 **Memory Cleaner** is a local memory and disk cleaning tool for Windows.
 
-It reads your machine's memory data, groups scattered processes by "application," and shows how much memory each app uses and what it's for — labeled with a three-color safety rating (red / yellow / green). You can select apps and terminate them with one click to free memory. It also includes a disk-cleaning module that breaks down disk usage by application and locates cleanable caches and junk files.
+It reads your machine's memory data, groups scattered processes by "application," and shows how much memory each app uses and what it's for — labeled with a three-color safety rating (red / yellow / green). You can terminate apps or only trim their working sets (public APIs, no undocumented kernel calls). It also includes a disk-cleaning module, plus **cache relocate**: copy a cache folder to another drive and put a directory junction (`mklink /J`) back at the original path.
 
-It is **zero-dependency** — the backend uses only Node.js built-in modules (`http`) plus PowerShell collection scripts, and the frontend is a single HTML file. No npm packages required. For safety, cleanup actions are guarded by **six gates** (default dry-run, protected-process blocking, mandatory confirmation, PID-reuse protection, batch limit, and audit logging), and freed-memory figures are reported only after a process actually exits. All data stays on your machine, and the server listens only on `127.0.0.1`.
+It is **zero-dependency** — the backend uses only Node.js built-in modules (`http`) plus PowerShell collection scripts, and the frontend is a single HTML file. No npm packages required. Cleanup is guarded by dry-run, protected-process blocking, confirmation, PID-reuse checks, a batch limit, audit logs, a busy-disk gate, and a hard ban on flushing Standby/Modified page lists. All data stays on your machine, and the server listens only on `127.0.0.1`.
 
-> **一句话版 / One-liner**：一个零依赖的 Windows 内存/磁盘清理工具，按应用归组展示占用与用途，带六道安全闸门守护清理。
-> A zero-dependency Windows memory & disk cleaner that groups usage by application and guards every cleanup with six safety gates.
+> **一句话版 / One-liner**：零依赖的 Windows 内存/磁盘清理工具：按应用归组、安全结束进程或修剪工作集，缓存可搬走并建目录链接。
+> A zero-dependency Windows memory & disk cleaner: group usage by app, trim working sets safely, or relocate caches with directory junctions.
 
 ---
+
+## 功能
+
+### 原有
+
+- **内存体检**：按应用归组显示占用、用途、红/黄/绿风险，口径对齐任务管理器 Working Set。
+- **结束进程释放内存**：先优雅关闭再强制结束；保护进程拦截、PID 复用防护、必须二次确认。
+- **磁盘垃圾清理**：只删词典白名单里的缓存/临时文件，不删安装目录、游戏、文档。
+- **按应用看磁盘占用**：C/D 盘路径归到应用，勾选后只清对应白名单缓存。
+- **提升权限**：标题栏弹出 UAC，以管理员身份重启本地服务。
+
+### 本次新增
+
+- **修剪工作集（不关程序）**：调用公开 API `EmptyWorkingSet` / `SetProcessWorkingSetSize`，进程继续运行。界面「一键清理」面板有独立按钮；`POST /api/cleanup/trim`。
+- **禁止未公开内核 API**：不调用 Mem Reduct 那类 `NtSetSystemInformation` 清空 Standby / Modified 页列表，降低蓝屏风险。
+- **磁盘忙碌拒绝清理**：下载或拷贝大文件时（吞吐 ≥ 20MB/s 或磁盘队列 ≥ 3）返回 HTTP 409，不自动强清。
+- **缓存搬走 + 目录链接**：把缓存复制到其他盘，原位置建 `mklink /J`（默认，无需管理员；可选 `/D` 符号链接）。程序仍写原路径，数据落在目标盘。失败自动回滚，原数据不丢。
+- **链接检查器**：判断路径是普通目录、junction、symlink 还是断链，并显示目标。`GET /api/disk/migrate/inspect`，命令行 `node disk-cli.js inspect <路径>`。
+- **内存条按本机条数显示**：现场读 `Win32_PhysicalMemory`；PowerShell 5.1 单条收成对象时也会收成数组，笔记本 1 条、台式机多条都能显示。
 
 ## 快速上手
 
@@ -146,6 +165,8 @@ logs/                         审计日志
 3. **用途绝不编造**：词典每条来自本机实测路径或 `Win32_Service` 服务表反查；查不到显示「未收录」。
 4. **清理先优雅后强制**：先发关闭消息（等同点 ×，让程序自己保存），失败才强制结束。
 5. **实测注意事项**：Windows 服务进程（如 `MSPCManagerService`）在普通权限下杀不掉，会返回「拒绝访问」——这是权限机制，需要以管理员身份运行。
+6. **清内存只用公开 API**：结束进程或修剪工作集；绝不强制清空系统待机/修改页列表。
+7. **缓存优先搬走而不是删除**：删除后程序会重建，占回 C 盘；搬走 + junction 后空间才是永久的。
 
 ## 提升权限
 
