@@ -26,3 +26,8 @@ node_modules/
 .env
 .env.*
 !.env.example
+
+# 缓存迁移记录（含本机路径）
+data/cache-migrations.json
+自测结果.md
+测试.md

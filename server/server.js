@@ -82,6 +82,12 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('  磁盘清理计划： GET /api/disk/cleanup/plan');
   console.log('  磁盘清理执行： POST /api/disk/cleanup/execute（需 confirmed=true）');
   console.log('  执行清理：  POST /api/cleanup/execute（需 confirmed=true）');
+  console.log('  磁盘忙碌：  GET /api/cleanup/io');
+  console.log('  修剪计划：  GET /api/cleanup/trim/plan');
+  console.log('  修剪工作集：POST /api/cleanup/trim（公开 API，需 confirmed=true）');
+  console.log('  迁移预置：  GET /api/disk/migrate/presets');
+  console.log('  链接检查：  GET /api/disk/migrate/inspect?path=');
+  console.log('  缓存迁移：  POST /api/disk/migrate/execute（默认 junction）');
   console.log('  权限状态：  GET /api/privilege/status');
   console.log('  提升权限：  POST /api/privilege/elevate（弹出 UAC）');
 });

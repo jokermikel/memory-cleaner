@@ -8,6 +8,8 @@
  *   node disk-cli.js apps     按应用归类占用（约 30~60 秒）
  *   node disk-cli.js C        只扫 C 盘一级目录
  *   node disk-cli.js D        只扫 D 盘一级目录
+ *   node disk-cli.js inspect <路径>     检查是否为链接/断链
+ *   node disk-cli.js migrate <源> <目标>  缓存迁移 dry-run（默认 junction）
  */
 
 const path = require('path');
@@ -17,6 +19,7 @@ const { fmt, volumes } = require(path.join(ws, 'server/services/diskService'));
 const { locate } = require(path.join(ws, 'server/services/junkLocator'));
 const { analyze } = require(path.join(ws, 'server/services/diskAnalyzer'));
 const { plan } = require(path.join(ws, 'server/services/diskCleanupService'));
+const cacheMigrate = require(path.join(ws, 'server/services/cacheMigrateService'));
 
 const arg = (process.argv[2] || 'junk').toLowerCase();
 
@@ -72,6 +75,48 @@ const C_JUNK = [
   '%LOCALAPPDATA%\\CrashDumps'
 ];
 
+
+function printInspect(target) {
+  if (!target) {
+    console.log('用法：node disk-cli.js inspect <路径>');
+    return;
+  }
+  const info = cacheMigrate.inspect(target);
+  const kind = info.broken ? '断链' : (info.linkKind || info.type);
+  console.log('\n════════════════════════════════════════════════');
+  console.log('  链接检查器');
+  console.log('════════════════════════════════════════════════');
+  console.log('  路径   ' + info.path);
+  console.log('  类型   ' + kind + (info.isLink ? '（链接）' : ''));
+  console.log('  存在   ' + (info.exists ? '是' : '否'));
+  if (info.target) console.log('  目标   ' + info.target);
+  console.log('  断链   ' + (info.broken ? '是' : '否'));
+}
+
+function printMigrate(src, dst) {
+  if (!src || !dst) {
+    console.log('用法：node disk-cli.js migrate <源目录> <目标目录>');
+    console.log('只打印计划，不改文件。真正迁移请用界面二次确认。');
+    return;
+  }
+  try {
+    const r = cacheMigrate.execute({ source: src, destination: dst, dryRun: true });
+    console.log('\n════════════════════════════════════════════════');
+    console.log('  缓存迁移计划（dry-run，不会改文件）');
+    console.log('════════════════════════════════════════════════');
+    console.log('  源     ' + r.source);
+    console.log('  目标   ' + r.destination);
+    console.log('  链接   ' + r.linkType + '（mklink /J，无需管理员）');
+    console.log('  文件   ' + r.fileCount + ' 个 / ' + fmt(r.estimatedBytes));
+    console.log('  目标盘剩余 ' + fmt(r.destFreeBytes));
+    console.log('  ' + r.occupiedHint);
+    (r.steps || []).forEach((s, i) => console.log('  ' + (i + 1) + '. ' + s));
+  } catch (e) {
+    console.log('预检失败：' + (e.code || '') + ' ' + e.message);
+    if (e.issues) e.issues.forEach(i => console.log('  - ' + i.code + ': ' + i.message));
+  }
+}
+
 const t0 = Date.now();
 
 function printVolumes() {
@@ -110,7 +155,11 @@ function printPlan() {
   console.log('  要真正删除请用界面：启动.bat → C/D 磁盘 → 确认删除勾选项');
 }
 
-if (arg === 'c' || arg === 'c:') {
+if (arg === 'inspect') {
+  printInspect(process.argv[3]);
+} else if (arg === 'migrate') {
+  printMigrate(process.argv[3], process.argv[4]);
+} else if (arg === 'c' || arg === 'c:') {
   console.log('\n正在扫描 C: …');
   printDrive(runScan('C:', C_TOP, C_JUNK));
 } else if (arg === 'd' || arg === 'd:') {

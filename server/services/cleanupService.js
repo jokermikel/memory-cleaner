@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
+const { assertDiskIdle } = require('./diskIoGuard');
 
 const WS = path.join(__dirname, '..', '..');
 const CLEANUP_PS1 = path.join(WS, 'server', 'collectors', 'cleanup.ps1');
@@ -180,6 +181,7 @@ function execute(opts = {}) {
     return { ...p, executed: false, message: '指定的 PID 不在清理计划内' };
   }
 
+  const disk = assertDiskIdle();
   const before = getSnapshot();
 
   const targetsFile = path.join(TMP_DIR, `cc_cleanup_targets_${Date.now()}.json`);
@@ -263,6 +265,7 @@ function execute(opts = {}) {
       afterPercent: after.system.usedPercent,
       failReasons,
       details: results,
+      diskIo: { bytesPerSec: disk.bytesPerSec, queueLength: disk.queueLength },
       auditLogged: true
     };
   } finally {

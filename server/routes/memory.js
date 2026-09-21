@@ -12,6 +12,9 @@ const { locate } = require('../services/junkLocator');
 const { analyze } = require('../services/diskAnalyzer');
 const { plan: diskPlan, execute: diskExecute } = require('../services/diskCleanupService');
 const { status: privilegeStatus, elevate } = require('../services/privilegeService');
+const { plan: trimPlan, execute: trimExecute } = require('../services/workingSetService');
+const { sampleDiskIo } = require('../services/diskIoGuard');
+const cacheMigrate = require('../services/cacheMigrateService');
 
 /** 参数校验：把字符串解析为正整数，非法返回 null */
 function parseIntParam(v, min = 0) {
@@ -227,6 +230,9 @@ async function handleCleanupExecute(req, res) {
     if (e.code === 'NOT_CONFIRMED' || e.code === 'BATCH_LIMIT') {
       return sendError(res, 400, e.code, e.message);
     }
+    if (e.code === 'DISK_BUSY') {
+      return sendError(res, 409, 'DISK_BUSY', e.message, e.sample || null);
+    }
     sendError(res, 500, 'CLEANUP_FAILED', '清理执行失败', e.message);
   }
 }
@@ -234,6 +240,132 @@ async function handleCleanupExecute(req, res) {
 /**
  * 路由分发。返回 true 表示已处理。
  */
+
+function handleCleanupIo(query, res) {
+  try {
+    sendJson(res, 200, sampleDiskIo());
+  } catch (e) {
+    sendError(res, 500, 'IO_SAMPLE_FAILED', '读取磁盘忙碌状态失败', e.message);
+  }
+}
+
+function handleTrimPlan(query, res) {
+  try {
+    const minMb = parseIntParam(query.minMb, 0);
+    sendJson(res, 200, trimPlan({ minMb: minMb || 0 }));
+  } catch (e) {
+    sendError(res, 500, 'TRIM_PLAN_FAILED', '生成工作集修剪计划失败', e.message);
+  }
+}
+
+async function handleTrimExecute(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return sendError(res, 400, 'BAD_BODY', '请求体解析失败', e.message);
+  }
+  try {
+    const result = trimExecute({
+      appKeys: Array.isArray(body.appKeys) ? body.appKeys : undefined,
+      pids: Array.isArray(body.pids) ? body.pids : undefined,
+      confirmed: body.confirmed === true,
+      dryRun: body.dryRun !== false,
+      minMb: Number.isFinite(body.minMb) ? body.minMb : 0
+    });
+    sendJson(res, 200, result);
+  } catch (e) {
+    if (e.code === 'PROTECTED_TARGET') {
+      return sendError(res, 403, 'PROTECTED_TARGET', e.message, { blocked: e.blocked });
+    }
+    if (e.code === 'NOT_CONFIRMED') {
+      return sendError(res, 400, e.code, e.message);
+    }
+    if (e.code === 'DISK_BUSY') {
+      return sendError(res, 409, 'DISK_BUSY', e.message, e.sample || null);
+    }
+    sendError(res, 500, 'TRIM_FAILED', '工作集修剪失败', e.message);
+  }
+}
+
+function handleMigratePresets(query, res) {
+  try {
+    sendJson(res, 200, { items: cacheMigrate.loadPresets() });
+  } catch (e) {
+    sendError(res, 500, 'MIGRATE_PRESETS_FAILED', '读取可迁移缓存清单失败', e.message);
+  }
+}
+
+function handleMigrateInspect(query, res) {
+  try {
+    const target = query.path || query.p;
+    if (!target || typeof target !== 'string' || !target.trim()) {
+      return sendError(res, 400, 'BAD_PATH', '请提供 path 参数');
+    }
+    sendJson(res, 200, cacheMigrate.inspect(target.trim()));
+  } catch (e) {
+    sendError(res, 500, 'INSPECT_FAILED', '检查链接失败', e.message);
+  }
+}
+
+function handleMigrateRecords(query, res) {
+  try {
+    sendJson(res, 200, cacheMigrate.listMigrations());
+  } catch (e) {
+    sendError(res, 500, 'MIGRATE_RECORDS_FAILED', '读取迁移记录失败', e.message);
+  }
+}
+
+const MIGRATE_CLIENT_CODES = new Set([
+  'NOT_CONFIRMED', 'CRITICAL_PATH', 'SOURCE_MISSING', 'SOURCE_IS_LINK',
+  'SOURCE_NOT_DIR', 'SAME_PATH', 'DEST_INSIDE_SOURCE', 'SOURCE_INSIDE_DEST',
+  'VOLUME_UNKNOWN', 'DISK_FULL', 'DEST_EXISTS', 'COPY_MISMATCH',
+  'SOURCE_IN_USE', 'LINK_FAILED', 'LINK_NOT_DETECTED', 'PROBE_FAILED'
+]);
+
+async function handleMigratePrecheck(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return sendError(res, 400, 'BAD_BODY', '请求体解析失败', e.message);
+  }
+  try {
+    const r = cacheMigrate.precheck(body.source, body.destination, {
+      linkType: body.linkType,
+      keepBackupDays: body.keepBackupDays
+    });
+    sendJson(res, r.ok ? 200 : 400, r);
+  } catch (e) {
+    sendError(res, 500, 'PRECHECK_FAILED', '迁移预检失败', e.message);
+  }
+}
+
+async function handleMigrateExecute(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return sendError(res, 400, 'BAD_BODY', '请求体解析失败', e.message);
+  }
+  try {
+    const result = cacheMigrate.execute({
+      source: body.source,
+      destination: body.destination,
+      linkType: body.linkType,
+      keepBackupDays: body.keepBackupDays,
+      dryRun: body.dryRun !== false,
+      confirmed: body.confirmed === true
+    });
+    sendJson(res, 200, result);
+  } catch (e) {
+    if (e.code && MIGRATE_CLIENT_CODES.has(e.code)) {
+      return sendError(res, 400, e.code, e.message, { issues: e.issues || null, check: e.check || null });
+    }
+    sendError(res, 500, 'MIGRATE_FAILED', '缓存迁移失败', e.message);
+  }
+}
+
 function handleMemoryRoutes(req, res, pathname, query) {
   switch (pathname) {
     case '/api/memory/snapshot':
@@ -250,6 +382,42 @@ function handleMemoryRoutes(req, res, pathname, query) {
       return true;
     case '/api/cleanup/plan':
       handleCleanupPlan(query, res);
+      return true;
+    case '/api/cleanup/io':
+      handleCleanupIo(query, res);
+      return true;
+    case '/api/cleanup/trim/plan':
+      handleTrimPlan(query, res);
+      return true;
+    case '/api/cleanup/trim':
+      if (req.method !== 'POST') {
+        sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
+        return true;
+      }
+      handleTrimExecute(req, res);
+      return true;
+    case '/api/disk/migrate/presets':
+      handleMigratePresets(query, res);
+      return true;
+    case '/api/disk/migrate/inspect':
+      handleMigrateInspect(query, res);
+      return true;
+    case '/api/disk/migrate/records':
+      handleMigrateRecords(query, res);
+      return true;
+    case '/api/disk/migrate/precheck':
+      if (req.method !== 'POST') {
+        sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
+        return true;
+      }
+      handleMigratePrecheck(req, res);
+      return true;
+    case '/api/disk/migrate/execute':
+      if (req.method !== 'POST') {
+        sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
+        return true;
+      }
+      handleMigrateExecute(req, res);
       return true;
     case '/api/cleanup/execute':
       if (req.method !== 'POST') {

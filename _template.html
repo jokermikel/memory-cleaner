@@ -331,11 +331,12 @@
     <div class="cleanup-head">
       <div>
         <h2>🧹 一键清理</h2>
-        <p class="cleanup-sub">勾选要关闭的应用，先看计划再执行。清理会关闭程序，未保存的内容会丢失。</p>
+        <p class="cleanup-sub">勾选要关闭的应用，先看计划再执行。清理会关闭程序，未保存的内容会丢失。本工具只结束进程或修剪工作集，<strong>不会</strong>强制清空系统待机/修改页列表。</p>
       </div>
       <div class="cleanup-actions">
         <button class="btn btn-ghost" id="btnPlan">生成清理计划</button>
-        <button class="btn btn-primary" id="btnExec" disabled>确认执行清理</button>
+        <button class="btn btn-ghost" id="btnTrim" disabled>修剪工作集（不关程序）</button>
+        <button class="btn btn-primary" id="btnExec" disabled>确认结束进程</button>
       </div>
     </div>
 
@@ -366,6 +367,57 @@
       </div>
       <div class="cleanup-result" id="diskResult" style="display:none"></div>
     </section>
+
+    <section class="cleanup-panel" id="migratePanel">
+      <div class="cleanup-head">
+        <div>
+          <h2>📦 缓存搬走（目录链接）</h2>
+          <p class="cleanup-sub">把缓存目录复制到其他盘，在原位置建立目录联接（mklink /J）。程序仍写原路径，数据落在目标盘，C 盘空间永久释放。默认不用管理员。失败自动回滚，原数据不会丢。</p>
+        </div>
+        <div class="cleanup-actions">
+          <button class="btn btn-ghost" id="btnMigPresets">加载常见缓存</button>
+          <button class="btn btn-ghost" id="btnMigPrecheck">预检</button>
+          <button class="btn btn-primary" id="btnMigExec" disabled>确认搬走并建链接</button>
+        </div>
+      </div>
+      <div class="cleanup-body">
+        <div class="metrics" style="margin-bottom:12px">
+          <label class="metric" style="display:flex;flex-direction:column;gap:6px">
+            <span class="k">预置目录</span>
+            <select id="migPreset" class="search" style="min-width:0">
+              <option value="">（手动填写源路径）</option>
+            </select>
+          </label>
+          <label class="metric" style="display:flex;flex-direction:column;gap:6px">
+            <span class="k">源目录</span>
+            <input class="search" id="migSrc" placeholder="例如 %LOCALAPPDATA%\NVIDIA\DXCache">
+          </label>
+          <label class="metric" style="display:flex;flex-direction:column;gap:6px">
+            <span class="k">目标目录</span>
+            <input class="search" id="migDst" placeholder="例如 D:\Cache\NVIDIA\DXCache">
+          </label>
+          <label class="metric" style="display:flex;flex-direction:column;gap:6px">
+            <span class="k">链接类型</span>
+            <select id="migType" class="search">
+              <option value="junction" selected>目录联接 /J（默认，无需管理员）</option>
+              <option value="symlink">符号链接 /D（需管理员或开发者模式）</option>
+            </select>
+          </label>
+        </div>
+        <div class="metrics" style="margin-bottom:12px">
+          <label class="metric" style="display:flex;flex-direction:column;gap:6px">
+            <span class="k">检查路径是否为链接</span>
+            <input class="search" id="migInspectPath" placeholder="粘贴要检查的路径">
+          </label>
+          <div class="metric" style="display:flex;align-items:flex-end">
+            <button class="btn btn-ghost" id="btnMigInspect" type="button">检查链接</button>
+          </div>
+        </div>
+        <div class="cleanup-hint" id="migHint">先点「加载常见缓存」或手动填源/目标，再预检。请先关闭占用该目录的程序。</div>
+      </div>
+      <div class="cleanup-result" id="migResult" style="display:none"></div>
+    </section>
+
     <div class="sel-bar" id="diskAppSelBar" style="display:none">
       <span class="sel-summary" id="diskAppSelSummary">勾选应用后，只会清理其白名单缓存，不会删除安装目录、游戏或文档。</span>
       <button class="btn btn-ghost" id="btnDiskAppClear" type="button">清除勾选</button>
@@ -417,7 +469,7 @@ const DATA = __SNAPSHOT_DATA__;
       ['已用', fmt(used), '物理内存已占用'],
       ['可用', fmt(s.availableBytes), '含待机缓存（任务管理器口径）'],
       ['提交', fmt(s.commitUsedBytes)+' / '+fmt(s.commitLimitBytes), '虚拟内存提交量 '+(s.commitUsedPercent||0)+'%'],
-      ['待机缓存', fmt(s.standbyCacheBytes), '清理可腾出空间，但可能拖慢程序'],
+      ['待机缓存', fmt(s.standbyCacheBytes), '系统自行管理的文件缓存，本工具不会强制清空'],
     ];
     document.getElementById('metrics').innerHTML = metrics.map(m =>
       '<div class="metric"><div class="v">'+m[1]+'</div><div class="k">'+m[0]+' · '+m[2]+'</div></div>'
@@ -426,9 +478,12 @@ const DATA = __SNAPSHOT_DATA__;
     document.getElementById('modules').innerHTML = (s.modules||[]).map(m =>
       '<div class="module-card"><div class="module-icon">💾</div>' +
       '<div class="module-info"><div class="m-name">' + fmt(m.capacityBytes) + ' ' + (m.manufacturer||'') + '</div>' +
-      '<div class="m-detail">' + m.bank + ' · DDR' + m.speedMhz + '（实跑 ' + (m.configuredSpeedMhz||m.speedMhz) + '）' +
+      '<div class="m-detail">' + (m.slot || m.bank || '插槽') +
+      (m.memoryType ? ' · ' + m.memoryType : '') +
+      (m.speedMhz ? ' · ' + m.speedMhz + ' MHz' : '') +
+      ((m.configuredSpeedMhz && m.configuredSpeedMhz !== m.speedMhz) ? '（实跑 ' + m.configuredSpeedMhz + ' MHz）' : '') +
       (m.partNumber ? ' · ' + m.partNumber : '') + '</div></div></div>'
-    ).join('') || '<div class="metric"><div class="k">未读到内存条信息</div></div>';
+    ).join('') || '<div class="metric"><div class="k">这台电脑没有读到内存条信息（WMI 可能被权限或虚拟机限制）</div></div>';
 
     const safeTotal = apps.filter(a => a.risk==='safe').reduce((sum,a)=>sum+a.workingSetBytes,0);
     document.getElementById('footer').textContent =
@@ -715,7 +770,7 @@ const DATA = __SNAPSHOT_DATA__;
     const bytes = chosen.reduce((s,a)=>s+a.workingSetBytes,0);
     let msg = '确认结束 ' + chosen.length + ' 个应用？\n\n' +
       chosen.map(a=>'· '+a.name+'  '+fmt(a.workingSetBytes)).join('\n') +
-      '\n\n预计释放 ' + fmt(bytes) + '\n未保存的内容会丢失。';
+      '\n\n预计释放 ' + fmt(bytes) + '\n未保存的内容会丢失。\n只结束进程，不会强制清空系统待机内存。';
     if(caution.length){
       msg += '\n\n⚠ 含 '+caution.length+' 个谨慎项：' + caution.map(a=>a.name).join('、') + '。结束可能影响正在使用的程序。';
     }
@@ -786,6 +841,7 @@ const DATA = __SNAPSHOT_DATA__;
     const resultBox = document.getElementById('cleanupResult');
     const btnPlan = document.getElementById('btnPlan');
     const btnExec = document.getElementById('btnExec');
+    const btnTrim = document.getElementById('btnTrim');
 
     // 检测是否为服务模式：能访问同源 API 才启用清理
     let serviceMode = false;
@@ -824,6 +880,7 @@ const DATA = __SNAPSHOT_DATA__;
         list.apps.forEach(a => picked.add(a.key));
         renderPlan(list);
         btnExec.disabled = list.processCount === 0;
+        if(btnTrim) btnTrim.disabled = list.processCount === 0;
       } catch(e) {
         body.innerHTML = '<div class="cleanup-hint">生成计划失败：' + e.message + '</div>';
       } finally {
@@ -867,7 +924,50 @@ const DATA = __SNAPSHOT_DATA__;
         '</strong> 个进程），预计释放 <strong>' + fmt(bytes) + '</strong>。' +
         '🔴 保护进程（' + list.blockedProtected.length + ' 个）已被自动排除，不会出现在列表中。';
       btnExec.disabled = chosen.length === 0;
+      if(btnTrim) btnTrim.disabled = chosen.length === 0;
     }
+
+
+    if(btnTrim) btnTrim.addEventListener('click', async () => {
+      if(!currentPlan) return;
+      const chosen = currentPlan.apps.filter(a => picked.has(a.key));
+      const bytes = chosen.reduce((s,a)=>s+a.workingSetBytes,0);
+      if(!confirm('确认修剪 ' + chosen.length + ' 个应用的工作集？\n\n' +
+        chosen.map(a=>'· '+a.name).join('\n') +
+        '\n\n预计可收缩约 ' + fmt(bytes) +
+        '\n不会关闭程序，也不会清空系统待机/修改页列表。\n只调用公开 API：EmptyWorkingSet / SetProcessWorkingSetSize。\n磁盘正在大文件下载/拷贝时会自动拒绝。')) return;
+      btnTrim.disabled = true;
+      btnTrim.textContent = '正在修剪…';
+      try {
+        const r = await (await fetch('/api/cleanup/trim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ appKeys: chosen.map(a=>a.key), dryRun:false, confirmed:true })
+        })).json();
+        resultBox.style.display = '';
+        if(r.error){
+          resultBox.className = 'cleanup-result result-warn';
+          resultBox.innerHTML = '<strong>修剪被拒绝：</strong>' + r.error.message;
+        } else {
+          const ok = (r.succeeded||0) > 0;
+          resultBox.className = 'cleanup-result ' + (ok ? 'result-ok' : 'result-warn');
+          resultBox.innerHTML = '<strong>' + (ok ? '工作集修剪完成' : '没有进程被修剪') + '</strong>' +
+            '<div>成功 ' + (r.succeeded||0) + ' / ' + (r.requested||0) +
+            ' · 工作集合计下降 <strong>' + fmt(r.workingSetDeltaBytes||0) + '</strong>' +
+            ' · 系统已用变化 ' + fmt(r.freedBytes||0) + '</div>' +
+            (r.systemDeltaNote ? '<div class="result-detail">'+r.systemDeltaNote+'</div>' : '') +
+            '<div class="result-detail">修剪不会结束进程；未保存内容不会丢失。</div>';
+          refreshSnapshot().then(() => render());
+        }
+      } catch(e) {
+        resultBox.style.display = '';
+        resultBox.className = 'cleanup-result result-warn';
+        resultBox.innerHTML = '<strong>修剪失败：</strong>' + e.message;
+      } finally {
+        btnTrim.disabled = false;
+        btnTrim.textContent = '修剪工作集（不关程序）';
+      }
+    });
 
     btnExec.addEventListener('click', async () => {
       if(!currentPlan) return;
@@ -875,7 +975,7 @@ const DATA = __SNAPSHOT_DATA__;
       const bytes = chosen.reduce((s,a)=>s+a.workingSetBytes,0);
       if(!confirm('确认关闭 ' + chosen.length + ' 个应用？\n\n' +
         chosen.map(a=>'· '+a.name).join('\n') +
-        '\n\n预计释放 ' + fmt(bytes) + '\n未保存的内容会丢失。')) return;
+        '\n\n预计释放 ' + fmt(bytes) + '\n未保存的内容会丢失。\n\n安全说明：只结束进程，不会调用未公开内核 API，也不会清空 Standby 内存列表。磁盘正在大文件下载/拷贝时会自动拒绝。')) return;
 
       btnExec.disabled = true;
       btnExec.textContent = '正在清理…';
@@ -1165,6 +1265,143 @@ const DATA = __SNAPSHOT_DATA__;
         updateDiskAppSel();
       }
     });
+
+
+    (function initMigrate(){
+      const sel = document.getElementById('migPreset');
+      const src = document.getElementById('migSrc');
+      const dst = document.getElementById('migDst');
+      const typeEl = document.getElementById('migType');
+      const hint = document.getElementById('migHint');
+      const resultBox = document.getElementById('migResult');
+      const btnLoad = document.getElementById('btnMigPresets');
+      const btnCheck = document.getElementById('btnMigPrecheck');
+      const btnExec = document.getElementById('btnMigExec');
+      const btnInspect = document.getElementById('btnMigInspect');
+      const inspectPath = document.getElementById('migInspectPath');
+      if(!sel || !btnLoad) return;
+      let lastCheck = null;
+
+      function showResult(ok, html){
+        resultBox.style.display = '';
+        resultBox.className = 'cleanup-result ' + (ok ? 'result-ok' : 'result-warn');
+        resultBox.innerHTML = html;
+      }
+
+      btnLoad.addEventListener('click', async () => {
+        btnLoad.disabled = true; btnLoad.textContent = '加载中…';
+        try {
+          const d = await (await fetch('/api/disk/migrate/presets')).json();
+          const items = d.items || [];
+          sel.innerHTML = '<option value="">（手动填写源路径）</option>' + items.map(i =>
+            '<option value="'+String(i.paths && i.paths[0] || '').replace(/"/g,'&quot;')+'">'+i.name+' — '+(i.paths&&i.paths[0]||'')+'</option>'
+          ).join('');
+          hint.textContent = '已加载 '+items.length+' 条常见缓存目录。选一条后会填入源路径，请再填目标盘目录。';
+        } catch(e) {
+          hint.textContent = '加载失败：'+e.message+'。请确认已通过 启动.bat 打开服务。';
+        } finally {
+          btnLoad.disabled = false; btnLoad.textContent = '加载常见缓存';
+        }
+      });
+
+      sel.addEventListener('change', () => {
+        if(sel.value) src.value = sel.value;
+      });
+
+      btnCheck.addEventListener('click', async () => {
+        if(!src.value.trim() || !dst.value.trim()){
+          hint.textContent = '请填写源目录和目标目录。';
+          btnExec.disabled = true;
+          return;
+        }
+        btnCheck.disabled = true; btnCheck.textContent = '预检中…';
+        try {
+          const r = await (await fetch('/api/disk/migrate/precheck', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ source: src.value.trim(), destination: dst.value.trim(), linkType: typeEl.value })
+          })).json();
+          lastCheck = r;
+          if(r.error){
+            showResult(false, '<strong>预检失败：</strong>'+r.error.message);
+            btnExec.disabled = true;
+            return;
+          }
+          if(!r.ok){
+            const lines = (r.issues||[]).map(i => '· '+i.message).join('<br>');
+            showResult(false, '<strong>预检未通过</strong><div class="result-detail">'+lines+'</div>');
+            btnExec.disabled = true;
+            return;
+          }
+          showResult(true,
+            '<strong>预检通过</strong>' +
+            '<div>源 '+r.source+' → 目标 '+r.destination+'</div>' +
+            '<div>文件 '+r.stats.files+' 个 / '+fmt(r.stats.bytes)+' · 链接类型 '+r.linkType+'</div>' +
+            '<div class="result-detail">'+r.occupiedHint+' 成功后备份保留 '+r.keepBackupDays+' 天。</div>'
+          );
+          btnExec.disabled = false;
+        } catch(e) {
+          showResult(false, '<strong>预检失败：</strong>'+e.message);
+          btnExec.disabled = true;
+        } finally {
+          btnCheck.disabled = false; btnCheck.textContent = '预检';
+        }
+      });
+
+      btnExec.addEventListener('click', async () => {
+        if(!src.value.trim() || !dst.value.trim()) return;
+        if(!confirm('确认把缓存搬走并在原位置建链接？\n\n源：'+src.value.trim()+'\n目标：'+dst.value.trim()+'\n类型：'+(typeEl.value==='symlink'?'符号链接 /D':'目录联接 /J')+'\n\n请先关闭占用该目录的程序。\n复制校验失败或建链失败会自动回滚，原数据不会丢。')) return;
+        btnExec.disabled = true; btnExec.textContent = '正在迁移…';
+        try {
+          const r = await (await fetch('/api/disk/migrate/execute', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+              source: src.value.trim(),
+              destination: dst.value.trim(),
+              linkType: typeEl.value,
+              dryRun:false,
+              confirmed:true
+            })
+          })).json();
+          if(r.error){
+            showResult(false, '<strong>迁移失败（已回滚）：</strong>'+r.error.message);
+          } else if(!r.executed){
+            showResult(false, '<strong>未执行：</strong>'+(r.message || '仍是 dry-run'));
+          } else {
+            showResult(true,
+              '<strong>迁移成功</strong>' +
+              '<div>链接类型 '+r.linkType+' · 文件 '+r.files+' 个 / '+fmt(r.bytes)+'</div>' +
+              '<div>备份 '+r.backupPath+'（保留至 '+r.expireAt+'）</div>' +
+              '<div class="result-detail">'+(r.message||'')+'</div>'
+            );
+          }
+        } catch(e) {
+          showResult(false, '<strong>迁移失败：</strong>'+e.message);
+        } finally {
+          btnExec.disabled = false; btnExec.textContent = '确认搬走并建链接';
+        }
+      });
+
+      btnInspect.addEventListener('click', async () => {
+        const pth = (inspectPath.value || src.value || '').trim();
+        if(!pth){ hint.textContent = '请填写要检查的路径'; return; }
+        try {
+          const r = await (await fetch('/api/disk/migrate/inspect?path='+encodeURIComponent(pth))).json();
+          if(r.error){
+            showResult(false, '<strong>检查失败：</strong>'+r.error.message);
+            return;
+          }
+          const kind = r.broken ? '断链' : (r.linkKind || r.type);
+          showResult(!r.broken,
+            '<strong>检查结果：'+kind+'</strong>' +
+            '<div>路径 '+r.path+'</div>' +
+            (r.target ? '<div>指向 '+r.target+'</div>' : '') +
+            '<div>存在 '+(r.exists?'是':'否')+' · 链接 '+(r.isLink?'是':'否')+' · 断链 '+(r.broken?'是':'否')+'</div>'
+          );
+        } catch(e) {
+          showResult(false, '<strong>检查失败：</strong>'+e.message);
+        }
+      });
+    })();
 
     btnApps.addEventListener('click', async () => {
       btnApps.disabled = true; btnApps.textContent = '扫描中（30~60秒）…';

@@ -8,9 +8,9 @@
 
 **内存清理助手**（Memory Cleaner）是一个面向 Windows 的本地内存与磁盘清理工具。
 
-它读取整机内存数据，把零散进程按「应用」归组，展示每个应用占用了多少内存、有什么用途，并按安全等级分红/黄/绿三色标注；用户勾选后可一键结束进程释放内存。另带磁盘清理模块，能按应用归类磁盘占用、定位可清理的缓存与垃圾文件。
+它读取整机内存数据，把零散进程按「应用」归组，展示每个应用占用了多少内存、有什么用途，并按安全等级分红/黄/绿三色标注；用户勾选后可一键结束进程释放内存，也可只修剪工作集（不关程序）。另带磁盘清理模块，能按应用归类磁盘占用、定位可清理的缓存与垃圾文件；缓存还可以「搬走 + 目录链接」到其他盘，而不是删掉后等程序重建。
 
-技术上**零依赖**——后端只用 Node.js 内置模块（`http`）+ PowerShell 采集脚本，前端是单文件 HTML 界面，不需要安装任何 npm 包。为保证安全，清理动作内置**六道闸门**（默认 dry-run、保护进程拦截、必须二次确认、PID 复用防护、批量上限、审计日志），且只在进程确实退出后才上报释放量。数据全部在你本机处理，服务只监听 `127.0.0.1`。
+技术上**零依赖**——后端只用 Node.js 内置模块（`http`）+ PowerShell 采集脚本，前端是单文件 HTML 界面，不需要安装任何 npm 包。为保证安全，清理动作内置**六道闸门**（默认 dry-run、保护进程拦截、必须二次确认、PID 复用防护、批量上限、审计日志），外加磁盘忙碌拒绝、以及「禁止未公开内核 API」硬红线：只结束进程或调用 `EmptyWorkingSet` / `SetProcessWorkingSetSize`，绝不清空 Standby / Modified 页列表。释放量只在进程确实退出（或修剪确实成功）后才上报。数据全部在你本机处理，服务只监听 `127.0.0.1`。
 
 ## English Description
 
@@ -49,6 +49,8 @@ node disk-cli.js plan    # dry-run 清理计划（不删文件）
 node disk-cli.js apps    # 按应用归类占用（约 30~60 秒）
 node disk-cli.js C       # 只扫 C 盘一级目录
 node disk-cli.js D       # 只扫 D 盘一级目录
+node disk-cli.js inspect <路径>          # 检查是否为 junction/symlink/断链
+node disk-cli.js migrate <源> <目标>     # 缓存迁移 dry-run（默认 mklink /J）
 ```
 
 ## 清理功能怎么用
@@ -56,9 +58,10 @@ node disk-cli.js D       # 只扫 D 盘一级目录
 1. 打开 http://127.0.0.1:7788/
 2. **在应用列表前面勾选**要处理的应用（🔴 保护项无法勾选）
 3. 顶部工具栏会显示「已选 N 个应用，预计释放 X」；点「结束已选应用」→ 弹窗二次确认 → 执行
-4. 也可以继续用底部「🧹 一键清理」面板：点「生成清理计划」后勾选再执行
+4. 也可以继续用底部「🧹 一键清理」面板：点「生成清理计划」后勾选再执行。同一面板有「修剪工作集（不关程序）」——只收缩工作集，不结束进程。
+5. 磁盘页下方「📦 缓存搬走」：选预置缓存目录或手填源/目标 → 预检 → 确认。默认在原位置建目录联接（`mklink /J`，无需管理员）；程序仍写原路径，数据落在目标盘。
 
-磁盘页「按应用看占用」同样带勾选：只能勾有白名单缓存的应用，删除的是缓存/临时文件，**不会删安装目录、游戏或文档**。
+磁盘页「按应用看占用」同样带勾选：只能勾有白名单缓存的应用，删除的是缓存/临时文件，**不会删安装目录、游戏或文档**。缓存若希望永久挪出 C 盘，优先用「搬走」而不是删除。
 
 清理后显示**前后对比**：清理前 → 清理后、实际释放多少、失败原因是什么。
 
@@ -72,6 +75,8 @@ node disk-cli.js D       # 只扫 D 盘一级目录
 | 4. PID 复用防护 | 执行前比对 PID + 启动时间，不一致则拒绝（防误杀刚启动的新进程） |
 | 5. 批量上限 | 一次超过 20 个进程要求显式 force |
 | 6. 审计日志 | 每次操作写入 `logs/cleanup-YYYYMMDD.log`，含成功/失败/原因 |
+| 7. 磁盘忙碌拒绝 | 磁盘吞吐 ≥ 20MB/s 或队列 ≥ 3 时返回 HTTP 409，避免下载/拷贝期间清理 |
+| 8. 禁止未公开内核 API | 不调用 `NtSetSystemInformation` 等，不清 Standby/Modified 列表 |
 
 **释放量真实性**：只有在进程确实退出后才上报释放量。如果没有任何进程被关闭，释放量报 0 并说明「系统内存差值为自然波动」——不拿波动冒充效果。
 
@@ -86,12 +91,20 @@ node disk-cli.js D       # 只扫 D 盘一级目录
 | `GET /api/memory/processes?q=chrome` | 进程明细 |
 | `GET /api/cleanup/plan` | 清理计划（dry-run） |
 | `POST /api/cleanup/execute` | 执行清理（需 `confirmed:true`） |
+| `GET /api/cleanup/io` | 磁盘忙碌采样（吞吐/队列） |
+| `GET /api/cleanup/trim/plan` | 工作集修剪计划（dry-run） |
+| `POST /api/cleanup/trim` | 修剪工作集（公开 API，需 `confirmed:true`） |
 | `GET /api/disk/volumes` | C/D 分区容量（毫秒级） |
 | `GET /api/disk/snapshot` | C/D 盘占用快照（一级目录 + 已知垃圾路径，约 30~60 秒） |
 | `GET /api/disk/junk` | 可清理垃圾分类清单（约 3 秒） |
 | `GET /api/disk/apps` | 按应用归类的磁盘占用 |
 | `GET /api/disk/cleanup/plan` | 磁盘清理计划（dry-run） |
 | `POST /api/disk/cleanup/execute` | 执行磁盘清理（需 confirmed=true，只删白名单路径） |
+| `GET /api/disk/migrate/presets` | 可搬走的常见缓存目录 |
+| `GET /api/disk/migrate/inspect?path=` | 链接检查器（普通目录 / junction / symlink / 断链） |
+| `GET /api/disk/migrate/records` | 已迁移记录 |
+| `POST /api/disk/migrate/precheck` | 迁移预检 |
+| `POST /api/disk/migrate/execute` | 缓存搬走 + 建链接（默认 junction，需 confirmed=true） |
 | `GET /api/privilege/status` | 当前是否管理员、能否提权 |
 | `POST /api/privilege/elevate` | 弹出 UAC，以管理员身份重启服务（`dryRun:true` 只出计划） |
 
@@ -108,11 +121,15 @@ server/
     memoryService.js          汇总（采集+归组+分级）
     appGrouper.js             归组算法（强制归组/父子跟随/svchost 折叠）
     riskClassifier.js         三色风险分级器
-    cleanupService.js         清理执行层（六道闸门）
-    __tests__/                单元测试（17 个用例）
+    cleanupService.js         清理执行层（六道闸门 + 磁盘忙碌拒绝）
+    workingSetService.js      工作集修剪（EmptyWorkingSet / SetProcessWorkingSetSize）
+    diskIoGuard.js            磁盘忙碌闸门
+    cacheMigrateService.js    缓存搬走 + 目录链接（默认 junction）
+    __tests__/                单元测试
   collectors/
     collect.ps1               内存采集脚本
     cleanup.ps1               进程清理脚本（含 PID 复用防护）
+    trimWorkingSet.ps1        工作集修剪脚本（仅公开 API）
     processList.js            合并双数据源
     systemMemory.js           整机内存/内存条结构化
 data/
@@ -145,6 +162,9 @@ logs/                         审计日志
 - 清理 Windows 服务进程需要管理员权限，普通权限会失败并如实报告原因。
 - 界面内嵌的是生成那一刻的快照，要看最新数据请重跑 `启动.bat`（提权重启也会重新采集）。
 - 磁盘扫描只认 robocopy 的 Bytes/字节行。中文 Windows 的「已结束: 2026年…」不能再被当成目录大小（空的崩溃转储曾因此一直显示 2026 B）。
+- 缓存搬走默认 `mklink /J`（目录联接），无需管理员、仅限本地卷；符号链接 `/D` 需要管理员或开发者模式。请先关闭占用该目录的程序，否则改名备份会失败并回滚。
+- 工作集修剪不会结束进程，系统「已用内存」不一定等量下降。
+- 本工具**不会**强制清空待机缓存；界面上的待机数值只是只读展示。
 
 ## 跨机器通用性（去硬编码）
 
@@ -154,15 +174,37 @@ logs/                         审计日志
 - **用户路径展开**：映射表与词典里的 `%LOCALAPPDATA%` / `%APPDATA%` / `%USERPROFILE%` / `%TEMP%` 在运行时展开为当前登录用户的真实路径，不再写死具体用户名。
 - **回收站按盘符注入**：回收站条目（`id` 以 `recycle` 开头）在扫描时按本机所有本地盘符动态生成 `$Recycle.Bin` 路径。
 - **无 D 盘降级**：只有系统盘时，数据盘列表为空，扫描循环安全跳过，应用仍能正常出系统盘的磁盘占用与垃圾清单。
+- **内存条按本机条数显示**：物理内存来自 `Win32_PhysicalMemory`，容量/厂商/插槽/频率/代数都是这台电脑现场读的，不写死。PowerShell 5.1 在只有 1 条内存时会把数组收成对象，采集脚本和 Node 侧都强制收成数组，笔记本单条、台式机多条都能显示。
 
 ## 测试
 
 ```bash
-node --test server/services/__tests__/   # 跑全部 9 个套件（45 用例）
+node --test server/services/__tests__/*.test.js
 ```
 
-- 测试含单元测试（归组守恒、风险分级、六道闸门、路径深度闸门、扫尾时序）与沙箱真杀/真删（`%TEMP%\cc-e2e-*` 沙箱内，不碰生产路径）。
-- 全量端到端回归见测试工作目录（`任务_0919` / `任务_0920` 下的 `run-tests.js`），104 用例全过。
+Node 24 必须带 `*.test.js`，只传目录会失败。明细见仓库根目录 `最终测试报告.md`。
+
+### 已完成
+
+| 范围 | 结果 |
+|---|---|
+| 原有单元测试（归组守恒、风险分级、六道闸门、磁盘清理、提权、扫尾时序等） | 45/45 通过 |
+| 新增：禁用内核 API 扫描、磁盘忙碌闸门、工作集修剪闸门 | 通过 |
+| 新增：缓存搬走沙箱真迁（`%TEMP%` 内 `mklink /J` + 探针 + 回滚相关拒绝项） | 9/9 通过 |
+| 新增：内存条 0 / 1（PowerShell 单条收成对象）/ N 条 | 通过 |
+| 上述新功能单测复跑 | **26/26 通过**（2026-09-21，Windows 11 10.0.26200.9457） |
+
+旧版全功能实测（采集/结束进程/HTTP/界面/CLI）见历史记录，当时 47 项通过。
+
+### 未完成（需在真机手工做）
+
+| 项 | 说明 |
+|---|---|
+| 界面点一遍新按钮 | 「修剪工作集」「缓存搬走」预检/确认未做 UI 点击测试 |
+| 真实缓存目录搬走 | 未对浏览器/游戏等生产路径执行，只在 `%TEMP%` 沙箱验证 |
+| 重启后目录链接仍有效 | junction 按 NTFS 语义应仍在，未实际重启验证 |
+| 大文件下载期间反复清理 | 未做蓝屏压力；高 I/O 时代码会拒绝清理，不能代替实测 |
+| ≥24 小时循环 | 未挂机 |
 
 ## 安全说明
 

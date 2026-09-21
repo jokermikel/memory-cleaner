@@ -48,10 +48,12 @@ function runCollector(includeServices) {
 function collectProcesses(includeServices) {
   const snap = runCollector(includeServices);
 
-  const cimByPid = new Map();
-  for (const c of snap.cimProcesses || []) cimByPid.set(c.ProcessId, c);
+  const { asArray } = require('./systemMemory');
 
-  const processes = (snap.processes || []).map(p => {
+  const cimByPid = new Map();
+  for (const c of asArray(snap.cimProcesses)) cimByPid.set(c.ProcessId, c);
+
+  const processes = asArray(snap.processes).map(p => {
     const cim = cimByPid.get(p.pid) || {};
     return {
       pid: p.pid,
@@ -84,10 +86,10 @@ function collectProcesses(includeServices) {
       collectedAt: snap.collectedAt,
       hostName: snap.hostName,
       isAdmin: snap.isAdmin,
-      errors: snap.errors || [],
+      errors: asArray(snap.errors),
       os: snap.os || null,
       cs: snap.cs || null,
-      modules: snap.modules || [],
+      modules: asArray(snap.modules),
       pagefile: snap.pagefile || null,
       perfOs: snap.perfOs || null,
       perfProc: snap.perfProc || null,

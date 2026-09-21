@@ -29,9 +29,9 @@ $cs = SafeGet { Get-CimInstance -ClassName Win32_ComputerSystem } 'cs'
 
 # ---------- 2. physical memory modules ----------
 $modules = SafeGet {
-  Get-CimInstance -ClassName Win32_PhysicalMemory |
+  @(Get-CimInstance -ClassName Win32_PhysicalMemory |
     Select-Object BankLabel, DeviceLocator, Capacity, Speed, ConfiguredClockSpeed,
-                  Manufacturer, PartNumber, SerialNumber, MemoryType, SMBIOSMemoryType
+                  Manufacturer, PartNumber, SerialNumber, MemoryType, SMBIOSMemoryType)
 } 'modules'
 
 # ---------- 3. page file ----------
@@ -89,6 +89,12 @@ $cimProc = SafeGet {
 
 if (-not $getProc) { $getProc = @() }
 if (-not $cimProc) { $cimProc = @() }
+# PS 5.1 ConvertTo-Json collapses a 1-element array to a bare object.
+# Wrap CIM collections so a laptop with one DIMM still serializes as [].
+if ($null -eq $modules) { $modules = @() } else { $modules = @($modules) }
+if ($null -eq $getProc) { $getProc = @() } else { $getProc = @($getProc) }
+if ($null -eq $cimProc) { $cimProc = @() } else { $cimProc = @($cimProc) }
+if ($null -eq $script:errors) { $script:errors = @() } else { $script:errors = @($script:errors) }
 
 # ---------- 5. scheduled service map (only when requested) ----------
 $serviceMap = $null
