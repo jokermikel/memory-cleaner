@@ -1,74 +1,70 @@
-# 内存清理应用
+# Memory Cleaner
 
-读电脑全部内存、按应用归组显示占用与用途、一键清理（带多重安全防护）。
+[简体中文](README_CN.md) | **English**
+
+Read your machine's full memory usage, group it by application with purpose labels, and clean up in one click (guarded by multiple safety mechanisms).
 
 ---
 
-## 中文简介
-
-**内存清理助手**（Memory Cleaner）是一个面向 Windows 的本地内存与磁盘清理工具。
-
-它读取整机内存数据，把零散进程按「应用」归组，展示每个应用占用了多少内存、有什么用途，并按安全等级分红/黄/绿三色标注；用户勾选后可一键结束进程释放内存，也可只修剪工作集（不关程序）。另带磁盘清理模块，能按应用归类磁盘占用、定位可清理的缓存与垃圾文件；缓存还可以「搬走 + 目录链接」到其他盘，而不是删掉后等程序重建。
-
-技术上**零依赖**——后端只用 Node.js 内置模块（`http`）+ PowerShell 采集脚本，前端是单文件 HTML 界面，不需要安装任何 npm 包。为保证安全，内置**九道闸门**：HTTP 访问控制（一次性令牌 + 环回 Host + 同源 Origin）、默认 dry-run、保护进程拦截、必须二次确认、PID 复用防护、批量上限、审计日志、磁盘忙碌拒绝，以及「禁止未公开内核 API」硬红线——只结束进程或调用 `EmptyWorkingSet` / `SetProcessWorkingSetSize`，绝不清空 Standby / Modified 页列表。释放量只在进程确实退出（或修剪确实成功）后才上报，且按各成功进程的工作集统计。数据全部在你本机处理，服务只监听 `127.0.0.1`。
-
-## English Description
+## Overview
 
 **Memory Cleaner** is a local memory and disk cleaning tool for Windows.
 
-It reads your machine's memory data, groups scattered processes by "application," and shows how much memory each app uses and what it's for — labeled with a three-color safety rating (red / yellow / green). You can terminate apps or only trim their working sets (public APIs, no undocumented kernel calls). It also includes a disk-cleaning module, plus **cache relocate**: copy a cache folder to another drive and put a directory junction (`mklink /J`) back at the original path.
+It reads the machine's memory data, groups scattered processes by *application*, and shows how much memory each app uses and what it is for — labeled with a three-color safety rating (red / yellow / green). After ticking the apps you want, you can terminate them to free memory, or only trim their working sets (without closing the programs). A disk-cleaning module is also included: it groups disk usage by application and locates removable caches and junk files. Caches can also be **relocated** to another drive with a directory junction, instead of being deleted only to be rebuilt by the app.
 
-It is **zero-dependency** — the backend uses only Node.js built-in modules (`http`) plus PowerShell collection scripts, and the frontend is a single HTML file. No npm packages required. Cleanup is guarded by dry-run, protected-process blocking, confirmation, PID-reuse checks, a batch limit, audit logs, a busy-disk gate, and a hard ban on flushing Standby/Modified page lists. All data stays on your machine, and the server listens only on `127.0.0.1`.
+Technically it is **zero-dependency** — the backend uses only Node.js built-in modules (`http`) plus PowerShell collection scripts, and the frontend is a single HTML file. No npm packages required. For safety, **nine gates** are enforced in code: HTTP access control (one-time token + loopback `Host` + same-origin `Origin`), default dry-run, protected-process blocking, mandatory confirmation, PID-reuse protection, batch limit, audit logs, busy-disk rejection, and a hard ban on undocumented kernel APIs — it only terminates processes or calls `EmptyWorkingSet` / `SetProcessWorkingSetSize`, and never flushes the Standby / Modified page lists. Freed-memory figures are reported only after a process actually exits (or a trim actually succeeds), and are counted per successful process. All data stays on your machine; the server listens only on `127.0.0.1`.
 
-> **一句话版 / One-liner**：零依赖的 Windows 内存/磁盘清理工具：按应用归组、安全结束进程或修剪工作集，缓存可搬走并建目录链接。
-> A zero-dependency Windows memory & disk cleaner: group usage by app, trim working sets safely, or relocate caches with directory junctions.
+> **One-liner**: A zero-dependency Windows memory & disk cleaner — group usage by app, terminate processes safely or trim working sets, and relocate caches with directory junctions.
 
 ---
 
-## 功能
+## Features
 
-### 原有
+### Core
 
-- **内存体检**：按应用归组显示占用、用途、红/黄/绿风险，口径对齐任务管理器 Working Set。
-- **结束进程释放内存**：先优雅关闭再强制结束；保护进程拦截、PID 复用防护、必须二次确认。
-- **磁盘垃圾清理**：只删词典白名单里的缓存/临时文件，不删安装目录、游戏、文档。
-- **按应用看磁盘占用**：C/D 盘路径归到应用，勾选后只清对应白名单缓存。
-- **提升权限**：标题栏弹出 UAC，以管理员身份重启本地服务。
+- **Memory checkup**: usage grouped by app with purpose and red / yellow / green risk; the metric matches Task Manager's Working Set.
+- **Terminate processes to free memory**: graceful close first, then forced kill; with protected-process blocking, PID-reuse protection, and mandatory confirmation.
+- **Disk junk cleanup**: only deletes caches / temp files on the dictionary allowlist — never install directories, games, or documents.
+- **Disk usage by app**: C / D drive paths grouped by application; ticking an app only clears its allowlisted caches.
+- **Privilege elevation**: raises UAC from the title bar and restarts the local service as administrator.
 
-### 本次新增
+### Added Later
 
-- **修剪工作集（不关程序）**：调用公开 API `EmptyWorkingSet` / `SetProcessWorkingSetSize`，进程继续运行。界面「一键清理」面板有独立按钮；`POST /api/cleanup/trim`。
-- **禁止未公开内核 API**：不调用 Mem Reduct 那类 `NtSetSystemInformation` 清空 Standby / Modified 页列表，降低蓝屏风险。
-- **磁盘忙碌拒绝清理**：下载或拷贝大文件时（吞吐 ≥ 20MB/s 或磁盘队列 ≥ 3）返回 HTTP 409，不自动强清。
-- **缓存搬走 + 目录链接**：把缓存复制到其他盘，原位置建 `mklink /J`（默认，无需管理员；可选 `/D` 符号链接）。程序仍写原路径，数据落在目标盘。失败自动回滚，原数据不丢。
-- **链接检查器**：判断路径是普通目录、junction、symlink 还是断链，并显示目标。`GET /api/disk/migrate/inspect`，命令行 `node disk-cli.js inspect <路径>`。
-- **内存条按本机条数显示**：现场读 `Win32_PhysicalMemory`；PowerShell 5.1 单条收成对象时也会收成数组，笔记本 1 条、台式机多条都能显示。
+- **Trim working sets (without closing apps)**: calls the public APIs `EmptyWorkingSet` / `SetProcessWorkingSetSize`; processes keep running. Dedicated button in the "One-click Cleanup" panel; `POST /api/cleanup/trim`.
+- **No undocumented kernel APIs**: does not call `NtSetSystemInformation` (as Mem Reduct does) to flush the Standby / Modified page lists, reducing blue-screen risk.
+- **Refuse cleanup while the disk is busy**: while downloading or copying large files (throughput ≥ 20MB/s or disk queue ≥ 3) it returns HTTP 409 instead of force-cleaning.
+- **Cache relocate + directory junction**: copy a cache to another drive and put `mklink /J` back at the original path (default; no admin required; `/D` symlink optional). Programs keep writing to the original path while the data lands on the target drive. Failures roll back automatically — no data loss.
+- **Link inspector**: tells whether a path is a normal directory, junction, symlink, or broken link, and shows its target. `GET /api/disk/migrate/inspect`, CLI: `node disk-cli.js inspect <path>`.
+- **RAM modules shown per machine**: reads `Win32_PhysicalMemory` live. PowerShell 5.1 collapses a single result into an object, so the collector always wraps it into an array — works for laptops (1 module) and desktops (several).
 
-### 本次安全加固与一致性修复（2026-09-23）
+### Security Hardening & Consistency Fixes (2026-09-23)
 
-按评审清单完成 13 项改动，其中 P0 三项补齐了「文档承诺」与「代码事实」的差距：
+13 changes from a review checklist were implemented; the three P0 items closed the gap between "documented promise" and "actual code":
 
-- **HTTP 访问控制**：服务启动生成一次性令牌并内嵌首页；写接口与昂贵的扫描接口都校验令牌，非环回 `Host`、跨源 `Origin` 一律拒绝，写请求体必须是 `application/json`。
-- **批量上限闸门真实生效**：原先前端恒传 `force` 使这道闸门形同虚设；现已把「放行批量」与「强制结束」拆成两个独立参数。
-- **磁盘禁止路径覆盖全部本地盘符**：原先只对 C/D 盘生效，现按本机盘符动态生成。
-- 另有 10 项跨机器 / 一致性 / 体验修复（垃圾扫描盘符动态化、PID 复用防护补齐回退、释放量改可归因口径、词典不再写死本机数值等）。
+- **HTTP access control**: the service generates a one-time token at startup and embeds it in the homepage. Both write endpoints and expensive scan endpoints verify the token; non-loopback `Host` and cross-origin `Origin` are rejected; write request bodies must be `application/json`.
+- **Batch limit gate now actually works**: the frontend used to send `force` unconditionally, which made the gate a no-op. "Allow batch" and "force kill" are now two separate parameters.
+- **Forbidden disk paths cover every local drive**: previously only C / D; now generated dynamically from the machine's drives.
+- Plus 10 portability / consistency / UX fixes (dynamic drive letter for junk scanning, PID-reuse fallback, attributable freed-memory accounting, dictionaries no longer hardcoding this machine's numbers, etc.).
 
-完整实施记录见 **`改动清单_实施总账.md`**（含逐项改动、实测数据，以及 4 处对原评审建议的推翻说明）。
+Full record lives in **`改动清单_实施总账.md`** (per-item changes, measured data, and the 4 review suggestions that were rejected).
 
-## 快速上手
+## Quick Start
 
-### 方式一：一键启动（推荐，功能完整）
-双击 **`启动.bat`**。它会自动：
-1. 采集一次实时内存数据
-2. 生成界面
-3. 启动本地服务并打开浏览器
+### Option 1: One-click launch (recommended, full functionality)
 
-界面地址：http://127.0.0.1:7788/ —— 在这个页面里**清理功能可用**。
+Double-click **`启动.bat`**. It will automatically:
+1. Collect a live memory snapshot
+2. Generate the UI
+3. Start the local service and open your browser
 
-### 方式二：直接看界面（只读）
-双击 **`内存清理助手.html`**。内置数据快照，无需启动任何东西，但清理按钮不可用——本地文件既访问不到接口，也拿不到服务下发的一次性访问令牌（写接口会返回 403 `UNAUTHORIZED`，界面会提示改用服务地址打开）。
+UI address: http://127.0.0.1:7788/ — **cleanup works** on this page.
 
-### 方式三：命令行
+### Option 2: Open the UI directly (read-only)
+
+Double-click **`内存清理助手.html`**. Data is embedded, so nothing needs to be started — but the cleanup buttons are unavailable: a local file can neither reach the API nor obtain the one-time access token issued by the service (write endpoints return 403 `UNAUTHORIZED`, and the UI tells you to open it through the service address instead).
+
+### Option 3: Command line
+
 ```bash
 node build.js       # 重新采集并生成界面
 node cli.js         # 内存排行（前 30）
@@ -83,179 +79,218 @@ node disk-cli.js inspect <路径>          # 检查是否为 junction/symlink/�
 node disk-cli.js migrate <源> <目标>     # 缓存迁移 dry-run（默认 mklink /J）
 ```
 
-## 清理功能怎么用
+## How to Clean Up
 
-1. 打开 http://127.0.0.1:7788/
-2. **在应用列表前面勾选**要处理的应用（🔴 保护项无法勾选）
-3. 顶部工具栏会显示「已选 N 个应用，预计释放 X」；点「结束已选应用」→ 弹窗二次确认 → 执行
-4. 也可以继续用底部「🧹 一键清理」面板：点「生成清理计划」后勾选再执行。同一面板有「修剪工作集（不关程序）」——只收缩工作集，不结束进程。
-5. 磁盘页下方「📦 缓存搬走」：选预置缓存目录或手填源/目标 → 预检 → 确认。默认在原位置建目录联接（`mklink /J`，无需管理员）；程序仍写原路径，数据落在目标盘。
+1. Open http://127.0.0.1:7788/
+2. **Tick the apps** you want to handle in the app list (🔴 protected items cannot be ticked)
+3. The top toolbar shows "Selected N apps, estimated free X"; click "End selected apps" → confirm in the dialog → execute
+4. Or use the bottom "🧹 One-click Cleanup" panel: click "Generate cleanup plan", tick, then execute. The same panel has "Trim working sets (without closing apps)" — it only shrinks working sets and never ends processes.
+5. On the disk page, "📦 Relocate cache": pick a preset cache directory or enter source / target → precheck → confirm. By default a directory junction (`mklink /J`, no admin needed) is created at the original path; programs keep writing there while the data lands on the target drive.
 
-磁盘页「按应用看占用」同样带勾选：只能勾有白名单缓存的应用，删除的是缓存/临时文件，**不会删安装目录、游戏或文档**。缓存若希望永久挪出 C 盘，优先用「搬走」而不是删除。
+"Disk usage by app" on the disk page supports ticking too: you can only tick apps that have allowlisted caches, and only caches / temp files are deleted — **never** install directories, games, or documents. To move a cache off C: permanently, prefer "relocate" over "delete".
 
-清理后显示**前后对比**：清理前 → 清理后、实际释放多少、失败原因是什么。
+After cleanup a **before / after comparison** is shown: before → after, how much was actually freed, and why anything failed.
 
-## 九道安全闸门（都写在代码里，不靠自觉）
+## Nine Safety Gates (Enforced in Code)
 
-| 闸门 | 行为 |
+| Gate | Behavior |
 |---|---|
-| 0. HTTP 访问控制 | 服务启动生成一次性 64 位令牌并内嵌到首页；**写接口（`POST`）与一切非豁免的读接口**都必须携带 `X-CC-Token`（只有 `/api/health`、`/api/disk/volumes` 等毫秒级无副作用的接口免令牌），且 `Host` 必须是环回地址、跨源 `Origin` 一律拒绝、有请求体的写请求必须是 `application/json` |
-| 1. 默认 dry-run | 不传 `dryRun:false` 就只出计划，绝不动进程 |
-| 2. 保护进程拦截 | 选中系统关键进程直接拒绝，返回 HTTP 403 + 中文原因 |
-| 3. 必须确认 | 真实执行必须传 `confirmed:true`，否则 HTTP 400 |
-| 4. PID 复用防护 | 执行前比对 PID + 启动时间，不一致则拒绝（防误杀刚启动的新进程） |
-| 5. 批量上限 | 一次超过 20 个进程，必须显式传 `acknowledgeBatchLimit:true`；`force` 只表示强制结束，不能用来放行批量 |
-| 6. 审计日志 | 每次操作写入 `logs/cleanup-YYYYMMDD.log`，含成功/失败/原因 |
-| 7. 磁盘忙碌拒绝 | 磁盘吞吐 ≥ 20MB/s 或队列 ≥ 3 时返回 HTTP 409，避免下载/拷贝期间清理 |
-| 8. 禁止未公开内核 API | 不调用 `NtSetSystemInformation` 等，不清 Standby/Modified 列表 |
+| 0. HTTP access control | A one-time 64-char token is generated at startup and embedded in the homepage; **write endpoints (`POST`) and every non-exempt read endpoint** must carry `X-CC-Token` (only millisecond-level side-effect-free endpoints such as `/api/health` and `/api/disk/volumes` are exempt). `Host` must be loopback, cross-origin `Origin` is rejected, and write request bodies must be `application/json` |
+| 1. Default dry-run | Without `dryRun:false` it only produces a plan and never touches a process |
+| 2. Protected-process blocking | Selecting a critical system process is rejected with HTTP 403 and a Chinese reason |
+| 3. Confirmation required | Real execution requires `confirmed:true`, otherwise HTTP 400 |
+| 4. PID-reuse protection | PID + start time are compared before execution; a mismatch is rejected (prevents killing a newly started process that reused the PID) |
+| 5. Batch limit | More than 20 processes in one run requires an explicit `acknowledgeBatchLimit:true`; `force` only means force-kill and cannot be used to allow a batch |
+| 6. Audit log | Every operation is written to `logs/cleanup-YYYYMMDD.log` with success / failure / reason |
+| 7. Busy-disk rejection | Disk throughput ≥ 20MB/s or queue ≥ 3 returns HTTP 409, avoiding cleanup during downloads / copies |
+| 8. No undocumented kernel APIs | Does not call `NtSetSystemInformation` or similar; never flushes the Standby / Modified lists |
 
-**访问控制的边界（如实说明）**：令牌靠首页下发，外部网页受同源策略限制读不到首页，因此拿不到令牌——这是**抬高门槛**，不是绝对隔离。本机上的程序仍可读取本地文件或首页拿到令牌。要做到真正的强隔离，需要改用命名管道等进程间通道，而不是 HTTP。
+**Honest boundary of the access control**: the token is delivered inside the homepage. External web pages cannot read the homepage because of the same-origin policy, so they cannot get the token — this **raises the bar**, it is not absolute isolation. A program already running on your machine can still read the local files or the homepage to obtain the token. True isolation would require switching to named pipes or another inter-process channel instead of HTTP.
 
-**释放量真实性**：只有在进程确实退出后才上报释放量。如果没有任何进程被关闭，释放量报 0 并说明「系统内存差值为自然波动」——不拿波动冒充效果。释放量按**各成功进程的工作集**统计（而非整机内存前后差值），避免把其它进程的自然波动算成本次战果。
+**Freed-memory honesty**: freed memory is reported only after a process actually exits. If nothing was closed, it reports 0 and explains that the system memory delta is just natural fluctuation — it never passes noise off as results. The figure is counted from **the working set of each successful process** (not from the whole-machine memory delta), so other processes' natural fluctuation is not counted as this run's gain.
 
-## 接口一览
+## API Overview
 
-所有接口都需要在请求头带 `X-CC-Token`（令牌从首页 HTML 的 `window.__CC_TOKEN__` 读取），**例外是几个毫秒级、无副作用的接口**：`/api/health`、`/api/cleanup/io`、`/api/disk/volumes`、`/api/disk/migrate/{presets,inspect,records}`、`/api/privilege/status`。
+All endpoints require the `X-CC-Token` request header (the token is read from `window.__CC_TOKEN__` in the homepage HTML). **Exceptions are a few millisecond-level, side-effect-free endpoints**: `/api/health`, `/api/cleanup/io`, `/api/disk/volumes`, `/api/disk/migrate/{presets,inspect,records}`, `/api/privilege/status`.
 
-为什么连读接口也要令牌：`/api/disk/snapshot` 与 `/api/disk/apps` 会做 30~60 秒的全盘扫描，若免令牌，任何网页用一个 `<img src="http://127.0.0.1:7788/api/disk/snapshot">` 就能反复触发（img 请求不带 `Origin`，来源校验挡不住，但它**一定带不上自定义请求头**）。`Host` / `Origin` 校验则对所有 `/api/*` 生效。
+Why even read endpoints need a token: `/api/disk/snapshot` and `/api/disk/apps` perform a 30~60 second full-drive scan. Without a token, any web page could trigger them repeatedly with a single `<img src="http://127.0.0.1:7788/api/disk/snapshot">` — an `img` request carries no `Origin`, so origin checks cannot stop it, but it **can never carry a custom request header**. The `Host` / `Origin` checks apply to all `/api/*`.
 
-| 接口 | 说明 |
+| Endpoint | Description |
 |---|---|
-| `GET /` | 界面（与服务同源，清理可用） |
-| `GET /api/health` | 健康检查（含 `isAdmin`） |
-| `GET /api/memory/snapshot` | 完整快照（系统 + 应用 + 分级 + 守恒） |
-| `GET /api/memory/apps?risk=safe&q=抖音&limit=20` | 应用排行 |
-| `GET /api/memory/processes?q=chrome` | 进程明细 |
-| `GET /api/cleanup/plan` | 清理计划（dry-run） |
-| `POST /api/cleanup/execute` | 执行清理（需 `confirmed:true`；进程数 > 20 时还需 `acknowledgeBatchLimit:true`） |
-| `GET /api/cleanup/io` | 磁盘忙碌采样（吞吐/队列） |
-| `GET /api/cleanup/trim/plan` | 工作集修剪计划（dry-run） |
-| `POST /api/cleanup/trim` | 修剪工作集（公开 API，需 `confirmed:true`） |
-| `GET /api/disk/volumes` | C/D 分区容量（毫秒级） |
-| `GET /api/disk/snapshot` | C/D 盘占用快照（一级目录 + 已知垃圾路径，约 30~60 秒） |
-| `GET /api/disk/junk` | 可清理垃圾分类清单（约 3 秒） |
-| `GET /api/disk/apps` | 按应用归类的磁盘占用 |
-| `GET /api/disk/cleanup/plan` | 磁盘清理计划（dry-run） |
-| `POST /api/disk/cleanup/execute` | 执行磁盘清理（需 confirmed=true，只删白名单路径） |
-| `GET /api/disk/migrate/presets` | 可搬走的常见缓存目录 |
-| `GET /api/disk/migrate/inspect?path=` | 链接检查器（普通目录 / junction / symlink / 断链） |
-| `GET /api/disk/migrate/records` | 已迁移记录 |
-| `POST /api/disk/migrate/precheck` | 迁移预检 |
-| `POST /api/disk/migrate/execute` | 缓存搬走 + 建链接（默认 junction，需 confirmed=true） |
-| `GET /api/privilege/status` | 当前是否管理员、能否提权 |
-| `POST /api/privilege/elevate` | 弹出 UAC，以管理员身份重启服务（`dryRun:true` 只出计划） |
+| `GET /` | UI (same origin as the service; cleanup works) |
+| `GET /api/health` | Health check (includes `isAdmin`) |
+| `GET /api/memory/snapshot` | Full snapshot (system + apps + rating + conservation) |
+| `GET /api/memory/apps?risk=safe&q=抖音&limit=20` | App ranking |
+| `GET /api/memory/processes?q=chrome` | Process details |
+| `GET /api/cleanup/plan` | Cleanup plan (dry-run) |
+| `POST /api/cleanup/execute` | Execute cleanup (requires `confirmed:true`; also `acknowledgeBatchLimit:true` when > 20 processes) |
+| `GET /api/cleanup/io` | Disk busy sampling (throughput / queue) |
+| `GET /api/cleanup/trim/plan` | Working-set trim plan (dry-run) |
+| `POST /api/cleanup/trim` | Trim working sets (public API, requires `confirmed:true`) |
+| `GET /api/disk/volumes` | C / D partition capacity (milliseconds) |
+| `GET /api/disk/snapshot` | C / D usage snapshot (top-level dirs + known junk paths, ~30~60s) |
+| `GET /api/disk/junk` | Cleanable junk, categorized (~3s) |
+| `GET /api/disk/apps` | Disk usage grouped by application |
+| `GET /api/disk/cleanup/plan` | Disk cleanup plan (dry-run) |
+| `POST /api/disk/cleanup/execute` | Execute disk cleanup (requires confirmed=true, allowlisted paths only) |
+| `GET /api/disk/migrate/presets` | Common cache directories that can be relocated |
+| `GET /api/disk/migrate/inspect?path=` | Link inspector (normal dir / junction / symlink / broken link) |
+| `GET /api/disk/migrate/records` | Relocation records |
+| `POST /api/disk/migrate/precheck` | Relocation precheck |
+| `POST /api/disk/migrate/execute` | Relocate cache + create link (junction by default, requires confirmed=true) |
+| `GET /api/privilege/status` | Whether you are admin and can elevate |
+| `POST /api/privilege/elevate` | Raise UAC and restart the service as admin (`dryRun:true` only returns the plan) |
 
-## 目录结构
+## Project Structure
+
 ```
-启动.bat                      一键启动（采集 + 生成 + 起服务 + 开浏览器）
-build.js                      采集数据并生成界面
-cli.js                        命令行排行
-内存清理助手.html            单文件界面（内嵌数据，双击可看）
+启动.bat                      One-click launch (collect + generate + serve + open browser)
+build.js                      Collect data and generate the UI
+cli.js                        Command-line ranking
+内存清理助手.html            Single-file UI (data embedded, double-click to view)
 server/
-  server.js                   HTTP 服务（零依赖，同时提供界面和接口）
-  routes/memory.js            RESTful 路由 + 参数校验 + 错误处理
+  server.js                   HTTP service (zero-dependency; serves both UI and API)
+  routes/memory.js            RESTful routes + parameter validation + error handling
   services/
-    memoryService.js          汇总（采集+归组+分级）
-    appGrouper.js             归组算法（强制归组/父子跟随/svchost 折叠）
-    riskClassifier.js         三色风险分级器
-    cleanupService.js         清理执行层（安全闸门 + 磁盘忙碌拒绝）
-    workingSetService.js      工作集修剪（EmptyWorkingSet / SetProcessWorkingSetSize）
-    diskIoGuard.js            磁盘忙碌闸门
-    cacheMigrateService.js    缓存搬走 + 目录链接（默认 junction）
+    memoryService.js          Aggregation (collect + group + rate)
+    appGrouper.js             Grouping algorithm (forced grouping / parent-child / svchost folding)
+    riskClassifier.js         Three-color risk classifier
+    cleanupService.js         Cleanup execution layer (safety gates + busy-disk rejection)
+    workingSetService.js      Working-set trimming (EmptyWorkingSet / SetProcessWorkingSetSize)
+    diskIoGuard.js            Busy-disk gate
+    cacheMigrateService.js    Cache relocation + directory link (junction by default)
   collectors/
-    collect.ps1               内存采集脚本
-    cleanup.ps1               进程清理脚本（含 PID 复用防护）
-    trimWorkingSet.ps1        工作集修剪脚本（仅公开 API）
-    processList.js            合并双数据源
-    systemMemory.js           整机内存/内存条结构化
+    collect.ps1               Memory collection script
+    cleanup.ps1               Process cleanup script (with PID-reuse protection)
+    trimWorkingSet.ps1        Working-set trim script (public APIs only)
+    processList.js            Merges two data sources
+    systemMemory.js           Machine memory / RAM module structuring
 data/
-  appDict.zh.json             中文用途词典（70+ 条）
-  protectedProcesses.json     禁止结束名单（18 个系统关键进程）
-  snapshot.json               最近一次采集快照
-logs/                         审计日志
+  appDict.zh.json             Chinese purpose dictionary (70+ entries)
+  protectedProcesses.json     Never-terminate list (18 critical system processes)
+  snapshot.json               Most recent collection snapshot
+logs/                         Audit logs
 ```
 
-## 关键设计（为什么这么做）
+## Key Design Decisions
 
-1. **主口径用 `Get-Process.WorkingSet64`**：实测同一时刻 CIM 的 `WorkingSetSize` 合计比真实已用偏大 1GB 以上，只有 WorkingSet64 对齐任务管理器。
-2. **归组守恒是硬约束**：归组后应用内存合计必须严格等于归组前进程合计，否则就是有进程被丢了。
-3. **用途绝不编造**：词典条目基于已在 Windows 上验证存在的常见路径，或 `Win32_Service` 服务表反查；查不到显示「未收录」。词典**不预置任何机器相关的数值**——大小一律由实时扫描给出，`note` 只写量级参考与操作提醒。
-4. **清理先优雅后强制**：先发关闭消息（等同点 ×，让程序自己保存），失败才强制结束。
-5. **实测注意事项**：Windows 服务进程（如 `MSPCManagerService`）在普通权限下杀不掉，会返回「拒绝访问」——这是权限机制，需要以管理员身份运行。
-6. **清内存只用公开 API**：结束进程或修剪工作集；绝不强制清空系统待机/修改页列表。
-7. **缓存优先搬走而不是删除**：删除后程序会重建，占回 C 盘；搬走 + junction 后空间才是永久的。
+1. **`Get-Process.WorkingSet64` is the primary metric**: measured at the same instant, CIM's `WorkingSetSize` total runs more than 1GB above real usage; only `WorkingSet64` matches Task Manager.
+2. **Grouping conservation is a hard constraint**: total app memory after grouping must exactly equal total process memory before grouping — otherwise a process was dropped.
+3. **Purposes are never invented**: dictionary entries are based on common paths verified to exist on Windows, or reverse lookups against the `Win32_Service` table; anything unknown shows "not catalogued". The dictionary **presets no machine-specific numbers** — sizes always come from a live scan, and `note` only carries magnitude hints and handling reminders.
+4. **Cleanup is graceful first, forced second**: a close message is sent first (equivalent to clicking ×, letting the program save), and only failure escalates to forced termination.
+5. **A note from real testing**: Windows service processes (such as `MSPCManagerService`) cannot be killed under normal privileges and return "access denied" — that is the permission model, and it needs administrator rights.
+6. **Only public APIs for freeing memory**: terminate processes or trim working sets; never force-flush the system standby / modified page lists.
+7. **Prefer relocating caches over deleting them**: deleted caches get rebuilt and reclaim C:; relocate + junction frees the space permanently.
 
-## 提升权限
+## Privilege Elevation
 
-界面标题栏有「🛡️ 提升权限」按钮（通过 `启动.bat` 打开服务后才会出现）。
+The title bar has a "🛡️ Elevate" button (it only appears once the service was started via `启动.bat`).
 
-1. 点击按钮 → 弹出 Windows 用户账户控制（UAC）
-2. 点「是」→ 服务以管理员身份重启，原页面自动刷新
-3. 点「否」→ 什么都不改，仍是普通权限
+1. Click the button → Windows User Account Control (UAC) appears
+2. Click "Yes" → the service restarts as administrator and the page refreshes automatically
+3. Click "No" → nothing changes; you stay at normal privileges
 
-提权后可以：结束原先「拒绝访问」的系统服务进程、读到更多进程的可执行路径。真正授权的是 UAC，应用本身提不了权。
+After elevating you can: terminate service processes that previously returned "access denied", and read executable paths for more processes. The real authorization is UAC — the app cannot elevate itself.
 
-## 已知边界
-- 普通权限下约 230~240 / 400+ 个进程读不到可执行文件路径。界面上靠进程名+词典兜底，点「提升权限」后覆盖率显著提升。
-- 清理 Windows 服务进程需要管理员权限，普通权限会失败并如实报告原因。
-- 界面内嵌的是生成那一刻的快照，要看最新数据请重跑 `启动.bat`（提权重启也会重新采集）。
-- 磁盘扫描只认 robocopy 的 Bytes/字节行。中文 Windows 的「已结束: 2026年…」不能再被当成目录大小（空的崩溃转储曾因此一直显示 2026 B）。
-- 缓存搬走默认 `mklink /J`（目录联接），无需管理员、仅限本地卷；符号链接 `/D` 需要管理员或开发者模式。请先关闭占用该目录的程序，否则改名备份会失败并回滚。
-- 工作集修剪不会结束进程，系统「已用内存」不一定等量下降。
-- 本工具**不会**强制清空待机缓存；界面上的待机数值只是只读展示。
+## Known Limitations
 
-## 跨机器通用性（去硬编码）
+- Under normal privileges, executable paths cannot be read for roughly 230~240 of 400+ processes. The UI falls back to process names + the dictionary; clicking "Elevate" raises coverage significantly.
+- Cleaning up Windows service processes requires administrator rights; without them it fails and reports the reason honestly.
+- The UI embeds a snapshot from the moment it was generated. To see fresh data, rerun `启动.bat` (elevating and restarting also re-collects).
+- Disk scanning only recognizes robocopy's `Bytes` / `字节` summary row. On Chinese Windows the "已结束: 2026年…" line must not be taken as a directory size (an empty crash dump once showed 2026 B because of this).
+- Cache relocation uses `mklink /J` (directory junction) by default: no admin needed, local volumes only; the `/D` symlink needs admin or Developer Mode. Close programs holding that directory first, or the rename-backup step fails and rolls back.
+- Working-set trimming does not end processes, so system "memory in use" may not drop by the same amount.
+- This tool does **not** force-flush the standby cache; the standby figure in the UI is read-only display.
 
-本应用不假设用户名、不写死盘符，可在任意 Windows 电脑上完整运行：
+## Portability (No Hardcoding)
 
-- **动态盘符枚举**：磁盘模块通过 `Win32_LogicalDisk (DriveType=3)` 枚举本机所有本地固定磁盘（单 C 盘、C+D、C+D+E 均可），系统盘用 `%SystemDrive%` 求取，非系统盘自动识别为数据盘。
-- **用户路径展开**：映射表与词典里的 `%LOCALAPPDATA%` / `%APPDATA%` / `%USERPROFILE%` / `%TEMP%` 在运行时展开为当前登录用户的真实路径，不再写死具体用户名。
-- **回收站按盘符注入**：回收站条目（`id` 以 `recycle` 开头）在扫描时按本机所有本地盘符动态生成 `$Recycle.Bin` 路径。
-- **无 D 盘降级**：只有系统盘时，数据盘列表为空，扫描循环安全跳过，应用仍能正常出系统盘的磁盘占用与垃圾清单。
-- **内存条按本机条数显示**：物理内存来自 `Win32_PhysicalMemory`，容量/厂商/插槽/频率/代数都是这台电脑现场读的，不写死。PowerShell 5.1 在只有 1 条内存时会把数组收成对象，采集脚本和 Node 侧都强制收成数组，笔记本单条、台式机多条都能显示。
+The app assumes no username and hardcodes no drive letter — it runs fully on any Windows machine:
 
-## 测试
+- **Dynamic drive enumeration**: the disk module enumerates all local fixed disks via `Win32_LogicalDisk (DriveType=3)` (single C, C+D, C+D+E all work). The system drive comes from `%SystemDrive%`, and non-system drives are treated as data drives.
+- **User path expansion**: `%LOCALAPPDATA%` / `%APPDATA%` / `%USERPROFILE%` / `%TEMP%` in the mapping table and dictionaries expand to the current logged-in user's real paths at runtime — no username is hardcoded.
+- **Recycle bin injected per drive**: recycle-bin entries (ids starting with `recycle`) generate `$Recycle.Bin` paths for every local drive at scan time.
+- **Degrades with no D: drive**: with only a system drive, the data-drive list is empty and the scan loop skips safely; the app still reports system-drive usage and junk.
+- **RAM modules shown per machine**: physical memory comes from `Win32_PhysicalMemory`; capacity / vendor / slot / speed / generation are read live from this machine, never hardcoded. PowerShell 5.1 collapses a single module into an object, so both the collector script and the Node side force it into an array — laptops with one module and desktops with several both display correctly.
 
-测试脚手架（`server/services/__tests__/`）只在维护者本地运行，**不随仓库分发**——它含本机路径、进程名等环境细节。
-以下是测试结论；完整明细见仓库根目录的 **`最终测试报告.md`**。
+## Testing
 
-维护者本地复跑：
+The test scaffolding (`server/services/__tests__/`) runs on the maintainer's machine only and is **not distributed with the repo** — it contains machine-specific paths and process names.
+Below are the test results; full details are in **`最终测试报告.md`** at the repo root.
+
+To rerun locally as the maintainer:
 
 ```bash
 node --test server/services/__tests__/*.test.js
 ```
 
-Node 24 必须带 `*.test.js`，只传目录会失败。
+Node 24 requires the `*.test.js` glob; passing just the directory fails.
 
-### 已完成
+### Completed
 
-| 范围 | 结果 |
+| Scope | Result |
 |---|---|
-| 原有单元测试（归组守恒、风险分级、安全闸门、磁盘清理、提权、扫尾时序等） | **96/96 通过**（14 套件） |
-| 新增：禁用内核 API 扫描、磁盘忙碌闸门、工作集修剪闸门 | 通过 |
-| 新增：缓存搬走沙箱真迁（`%TEMP%` 内 `mklink /J` + 探针 + 回滚相关拒绝项） | 9/9 通过 |
-| 新增：内存条 0 / 1（PowerShell 单条收成对象）/ N 条 | 通过 |
-| 新增：批量上限独立闸门、磁盘禁止路径全盘符、垃圾扫描盘符动态化、PID 复用回退、释放量进程级口径 | 12/12 通过 |
-| 新增：词典不写死本机值、CLI 与服务端垃圾清单同源、死代码清除 | 4/4 通过 |
-| 上述新功能单测复跑 | **96/96 通过**（2026-09-23，Windows 11 10.0.26200.9457） |
+| Existing unit tests (grouping conservation, risk rating, safety gates, disk cleanup, elevation, sweep timing, etc.) | **96/96 passed** (14 suites) |
+| Added: undocumented-kernel-API scan, busy-disk gate, working-set trim gate | Passed |
+| Added: cache relocation in a sandbox (`mklink /J` inside `%TEMP%` + probe + rollback rejection cases) | 9/9 passed |
+| Added: RAM modules 0 / 1 (PowerShell collapsing to an object) / N | Passed |
+| Added: standalone batch-limit gate, forbidden paths for all drives, dynamic junk-scan drive letter, PID-reuse fallback, per-process freed-memory accounting | 12/12 passed |
+| Added: dictionary free of machine-specific values, CLI and server sharing one junk list, dead code removal | 4/4 passed |
+| Rerun of all the above | **96/96 passed** (2026-09-23, Windows 11 10.0.26200.9457) |
 
-端到端 **150 项**（T0~T12，含 HTTP 访问控制与 P2 项回归）同样只在本地执行，不随仓库分发。
+End-to-end **150 checks** (T0~T12, including HTTP access control and the P2 regressions) also run locally only and are not distributed.
 
-旧版全功能实测（采集/结束进程/HTTP/界面/CLI）见历史记录，当时 47 项通过。
+The older full-function pass (collection / process termination / HTTP / UI / CLI) is in the historical record: 47 checks passed at the time.
 
-### 未完成（需在真机手工做）
+### Not Covered (Manual, On Real Machines)
 
-| 项 | 说明 |
+| Item | Note |
 |---|---|
-| 界面点一遍新按钮 | 「修剪工作集」「缓存搬走」预检/确认，以及磁盘应用的「显示全部」，未做 UI 点击测试 |
-| 真实缓存目录搬走 | 未对浏览器/游戏等生产路径执行，只在 `%TEMP%` 沙箱验证 |
-| 重启后目录链接仍有效 | junction 按 NTFS 语义应仍在，未实际重启验证 |
-| 大文件下载期间反复清理 | 未做蓝屏压力；高 I/O 时代码会拒绝清理，不能代替实测 |
-| ≥24 小时循环 | 未挂机 |
+| Click through the new UI buttons | Precheck / confirm for "trim working sets" and "relocate cache", plus "show all" for disk apps — no real UI click testing |
+| Relocating a real cache directory | Not run against production browser / game paths; only verified in a `%TEMP%` sandbox |
+| Junction still valid after reboot | Should survive per NTFS semantics; not verified with an actual reboot |
+| Repeated cleanup during large downloads | No blue-screen stress test; the code refuses cleanup under high I/O, which is not a substitute for real testing |
+| ≥24 hour loop | Not run |
 
-## 安全说明
+## Security Notes
 
-- 运行时快照 `data/snapshot.json` 与生成界面 `内存清理助手.html` 含本机真实进程清单与用户名，已由 `.gitignore` 排除，**不会上传到仓库**。
-- 审计日志（`logs/`、`*.log`）与带时间戳的工具备份（`*.2026-*-*Z`）同样排除。
-- 单元测试脚手架（`server/services/__tests__/`）含本机路径与进程名等环境细节，已由 `.gitignore` 排除，不随仓库分发。
-- 本项目零依赖、无项目密钥；服务仅监听 `127.0.0.1`，不对外暴露。访问控制见上文「九道安全闸门」第 0 道。
+- The runtime snapshot `data/snapshot.json` and the generated UI `内存清理助手.html` contain this machine's real process list and username. Both are excluded by `.gitignore` and are **never uploaded**.
+- Audit logs (`logs/`, `*.log`) and timestamped tool backups (`*.2026-*-*Z`) are excluded as well.
+- The unit-test scaffolding (`server/services/__tests__/`) contains machine-specific paths and process names; it is excluded by `.gitignore` and not distributed.
+- Zero dependencies, no project secrets; the service listens only on `127.0.0.1` and is not exposed externally. See gate 0 in "Nine Safety Gates" above for access control.
+
+## FAQ
+
+- **Why are the cleanup buttons unavailable after double-clicking `内存清理助手.html`?**
+  A local file (`file://`) can neither reach the API nor obtain the one-time access token issued by the service — write endpoints return 403 `UNAUTHORIZED`. Start the service with `启动.bat` and open http://127.0.0.1:7788/ instead.
+
+- **Why can't some processes' paths be read, or why can't they be killed?**
+  Under normal privileges the executable path cannot be read for roughly 230~240 of 400+ processes; the UI falls back to process names plus the dictionary. Windows service processes (such as `MSPCManagerService`) return "access denied". Click "🛡️ Elevate" in the title bar, confirm UAC, and coverage improves significantly.
+
+- **"Memory in use" did not drop after trimming working sets?**
+  Trimming does not end processes, so system "memory in use" does not necessarily fall by the same amount — that is expected.
+
+- **Will it flush the system standby cache and cause a blue screen?**
+  No. It only terminates processes, or calls the public APIs `EmptyWorkingSet` / `SetProcessWorkingSetSize` to trim working sets. It **never** calls `NtSetSystemInformation` to flush the Standby / Modified lists. The standby figure in the UI is read-only display.
+
+- **Should a cache be "deleted" or "relocated"?**
+  Prefer "relocate". Deleted caches get rebuilt and reclaim C:; relocate + `mklink /J` frees the space permanently.
+
+- **Can I run it on another machine as-is?**
+  Yes. No username or drive letter is hardcoded: drives are enumerated via `Win32_LogicalDisk (DriveType=3)`, and `%LOCALAPPDATA%` / `%APPDATA%` / `%USERPROFILE%` / `%TEMP%` expand to the current user's real paths at runtime. It degrades automatically when only C: exists.
+
+## Contributing
+
+There is no formal external contribution process yet. If you want to modify it yourself, these notes will save you some trouble:
+
+1. Read `最终测试报告.md` and `改动清单_实施总账.md` first to learn the existing safety constraints and historical pitfalls
+   (for example: `force` must not be used to allow a batch, and freed memory must not be computed from the whole-machine memory delta).
+2. Do not commit runtime artifacts — `data/snapshot.json`, `内存清理助手.html`, `logs/`, `*.log` are already excluded by `.gitignore`; please do not `git add -f` them.
+3. Run the local tests after changes: `node --test server/services/__tests__/*.test.js`
+   (Node 24 requires the `*.test.js` glob; passing just the directory fails).
+4. For UI changes, edit `_template.html` and then run `node build.js` to regenerate the single-file UI —
+   editing `内存清理助手.html` directly will be overwritten by the next build.
+
+## License
+
+This project **does not yet ship a LICENSE file; no license has been specified**. Please check with the author before using, modifying, or distributing it.
+(The author can add a `LICENSE` file to the repo root later if they choose to open-source it.)
