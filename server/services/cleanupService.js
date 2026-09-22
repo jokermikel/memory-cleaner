@@ -6,7 +6,8 @@
  *   1. 默认 dry-run：只计算出「会关掉什么、预计释放多少」，不动任何进程
  *   2. 拒绝操作 protected 进程：返回明确错误，不静默跳过
  *   3. PID 复用防护：执行前重新校验 PID + 启动时间，避免误杀复用 PID 的新进程
- *   4. 批量上限：一次超过 20 个进程时强制要求显式 confirmed=true
+ *   4. 批量上限：一次超过 20 个进程时强制要求显式 acknowledgeBatchLimit=true
+ *      （注意：不能用 force 代替——force 只负责「优雅关闭失败后强制结束」）
  *   5. 审计日志：所有清理操作落盘 logs/cleanup-YYYYMMDD.log
  *   6. 效果量化：执行前后各采一次内存快照，算真实释放量
  */
@@ -23,6 +24,56 @@ const LOG_DIR = path.join(WS, 'logs');
 const TMP_DIR = path.join(os.tmpdir());
 
 const BATCH_LIMIT = 20;
+
+/**
+ * 批量上限闸门（纯函数，便于单测）。
+ *
+ * 历史坑：这道闸门原先判定条件写的是 `!opts.force`，而前端恒传 `force:true`，
+ * 于是闸门等于不存在。根因是同一个标志被塞了两个语义：
+ *   - 放行批量（用户已知悉要一次关掉这么多进程）
+ *   - 强制结束（优雅关闭失败后用 taskkill /F + 扫尾）
+ * 这里把「放行批量」独立成 acknowledgeBatchLimit，force 只保留强制结束语义。
+ *
+ * @param {number} processCount 本次计划影响的进程数
+ * @param {Object} [opts]
+ * @param {boolean} [opts.acknowledgeBatchLimit] 用户是否已显式知悉超出批量上限
+ */
+function assertBatchAllowed(processCount, opts = {}) {
+  if (processCount > BATCH_LIMIT && !opts.acknowledgeBatchLimit) {
+    const err = new Error(`超过批量上限 ${BATCH_LIMIT}，需显式传 acknowledgeBatchLimit=true 表示知悉`);
+    err.code = 'BATCH_LIMIT';
+    throw err;
+  }
+}
+
+/**
+ * 计算「本次动作造成的释放量」（纯函数，便于单测）。
+ *
+ * 历史坑：原先直接用「整机已用内存前后差值」（before.system.usedBytes -
+ * after.system.usedBytes）当释放量上报。但整机内存一直在动，其它进程自己退出、
+ * 系统回收缓存、后台任务启停都会让这个差值漂移，把自然波动算成清理战果。
+ *
+ * 改成进程级口径：把**成功结束的进程各自退出前的占用**加起来。
+ * 这才是「本次动作释放了什么」的定义，与其它进程的自然波动无关。
+ *
+ * 整机前后差值不丢弃，降级为 systemDeltaBytes 对照字段供排查用，
+ * 但不再作为「释放量」上报。
+ *
+ * @param {Array<{ok?:boolean, wsBefore?:number}>} results 清理脚本返回的逐进程明细
+ * @returns {{freedBytes:number, succeededCount:number}}
+ */
+function sumFreedBytes(results) {
+  const list = Array.isArray(results) ? results : [];
+  let freed = 0;
+  let succeeded = 0;
+  for (const r of list) {
+    if (!r || !r.ok) continue;
+    succeeded += 1;
+    const ws = Number(r.wsBefore);
+    if (Number.isFinite(ws) && ws > 0) freed += ws;
+  }
+  return { freedBytes: freed, succeededCount: succeeded };
+}
 
 function ensureDir(d) {
   try { fs.mkdirSync(d, { recursive: true }); } catch (e) { }
@@ -118,7 +169,7 @@ function plan(opts = {}) {
     beforeUsedBytes: snap.system.usedBytes,
     beforeFreeBytes: snap.system.freePhysicalBytes,
     warning: procs.length > BATCH_LIMIT
-      ? `本次将关闭 ${procs.length} 个进程，超过 ${BATCH_LIMIT} 个上限，执行时必须传 confirmed=true`
+      ? `本次将关闭 ${procs.length} 个进程，超过 ${BATCH_LIMIT} 个上限，执行时必须传 acknowledgeBatchLimit=true`
       : null,
     collectedAt: snap.collectedAt
   };
@@ -129,7 +180,8 @@ function plan(opts = {}) {
  * @param {Object} opts
  * @param {Array<string>} opts.appKeys
  * @param {Array<number>} [opts.pids]   只清理指定 PID（更精确）
- * @param {boolean} [opts.force]        优雅关闭失败后是否强制结束
+ * @param {boolean} [opts.force]        优雅关闭失败后是否强制结束（与批量上限判定无关）
+ * @param {boolean} [opts.acknowledgeBatchLimit] 计划进程数超过 BATCH_LIMIT 时是否已显式知悉
  * @param {boolean} [opts.confirmed]    是否已确认
  * @param {boolean} [opts.dryRun]       默认 true；传 false 才真执行
  * @param {number}  [opts.minMb]
@@ -163,11 +215,8 @@ function execute(opts = {}) {
     err.code = 'NOT_CONFIRMED';
     throw err;
   }
-  if (p.processCount > BATCH_LIMIT && !opts.force) {
-    const err = new Error(`超过批量上限 ${BATCH_LIMIT}，需显式传 force=true 表示知悉`);
-    err.code = 'BATCH_LIMIT';
-    throw err;
-  }
+  // 批量上限闸门：只看 acknowledgeBatchLimit，不看 force（force 只负责强制结束）
+  assertBatchAllowed(p.processCount, opts);
   if (p.processCount === 0) {
     return { ...p, executed: false, message: '没有需要清理的进程' };
   }
@@ -223,11 +272,11 @@ function execute(opts = {}) {
     const after = getSnapshot();
 
     const succeeded = results.filter(r => r.ok);
-    const freedBytes = Math.max(0, before.system.usedBytes - after.system.usedBytes);
-
-    // 真实性校验：如果没有进程真正退出，系统已用内存的差值只是自然波动，
-    // 不能当成「清理释放量」上报（否则是误报）。
-    const realFreedBytes = succeeded.length > 0 ? freedBytes : 0;
+    // 释放量口径：各成功结束进程退出前的占用之和（可归因），
+    // 不再用整机前后差值（含其它进程的自然波动）。
+    const { freedBytes: realFreedBytes } = sumFreedBytes(results);
+    // 整机前后差值仅作对照，不参与「释放量」上报。
+    const systemDeltaBytes = Math.max(0, before.system.usedBytes - after.system.usedBytes);
 
     // 失败原因归类，便于用户判断（尤其服务进程需要管理员权限）
     const failReasons = {};
@@ -243,8 +292,9 @@ function execute(opts = {}) {
     }
 
     audit(`EXECUTED 请求关闭 ${procs.length} 个进程，成功 ${succeeded.length} 个；` +
-      `已用 ${(before.system.usedBytes / 1048576).toFixed(1)}MB → ${(after.system.usedBytes / 1048576).toFixed(1)}MB；` +
-      `真实释放 ${(realFreedBytes / 1048576).toFixed(1)}MB；` +
+      `释放 ${(realFreedBytes / 1048576).toFixed(1)}MB（各成功进程工作集之和）；` +
+      `整机已用 ${(before.system.usedBytes / 1048576).toFixed(1)}MB → ${(after.system.usedBytes / 1048576).toFixed(1)}MB` +
+      `（差值 ${(systemDeltaBytes / 1048576).toFixed(1)}MB 含自然波动，仅对照）；` +
       `明细: ${succeeded.map(r => r.name + '(' + r.pid + ',' + r.method + ')').join(' ') || '无'}` +
       (Object.keys(failReasons).length ? `；失败原因: ${JSON.stringify(failReasons)}` : ''));
 
@@ -255,10 +305,11 @@ function execute(opts = {}) {
       succeeded: succeeded.length,
       failed: results.length - succeeded.length,
       freedBytes: realFreedBytes,
-      systemDeltaBytes: freedBytes,
-      systemDeltaNote: succeeded.length === 0
-        ? '没有任何进程被成功关闭，系统内存差值为自然波动，不代表清理效果'
-        : null,
+      freedBytesNote: succeeded.length === 0
+        ? '没有任何进程被成功关闭，本次释放量为 0'
+        : '释放量 = 各成功关闭进程退出前的工作集之和（本次动作可归因部分）',
+      systemDeltaBytes,
+      systemDeltaNote: '整机已用内存前后差值，含其它进程的自然波动，仅供参考，不作为释放量',
       beforeUsedBytes: before.system.usedBytes,
       afterUsedBytes: after.system.usedBytes,
       beforePercent: before.system.usedPercent,
@@ -274,4 +325,4 @@ function execute(opts = {}) {
   }
 }
 
-module.exports = { plan, execute, BATCH_LIMIT, LOG_DIR };
+module.exports = { plan, execute, assertBatchAllowed, sumFreedBytes, BATCH_LIMIT, LOG_DIR };

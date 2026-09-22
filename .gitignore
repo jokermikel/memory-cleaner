@@ -31,3 +31,7 @@ node_modules/
 data/cache-migrations.json
 自测结果.md
 测试.md
+
+# ── 单元测试脚手架（开发者本地运行，不上传）──
+# 测试结论见仓库根目录的「最终测试报告.md」；测试代码含本机路径/进程名等环境细节
+server/services/__tests__/

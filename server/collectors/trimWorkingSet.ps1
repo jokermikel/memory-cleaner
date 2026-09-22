@@ -2,7 +2,7 @@
 # Allowed: EmptyWorkingSet (psapi) / SetProcessWorkingSetSize (kernel32).
 # FORBIDDEN: UndocumentedSystemMemoryApi, UndocumentedMemoryListClass, ForbiddenMemoryFlush*,
 #            standby/modified list flush, any undocumented kernel call.
-# Input : targets JSON [{pid, name, startTimeMs}]
+# Input : targets JSON [{pid, name, startTimeMs}]  (startTime accepted as fallback)
 # Output: result  JSON [{pid, name, ok, method, error, wsBefore, wsAfter, verified}]
 # Keep pure ASCII (PowerShell 5.1 reads .ps1 as ANSI).
 
@@ -70,6 +70,15 @@ function Test-PidReused($t, $proc) {
   $expectedMs = $null
   if ($t.PSObject.Properties.Name -contains 'startTimeMs' -and $t.startTimeMs) {
     try { $expectedMs = [int64]$t.startTimeMs } catch { $expectedMs = $null }
+  }
+  # Fallback: some callers only carry the ISO-8601 string 'startTime'.
+  # Mirrors cleanup.ps1 so an unverified PID is not silently waved through.
+  if (-not $expectedMs -and $t.startTime) {
+    if ($t.startTime -is [DateTime]) {
+      $expectedMs = Get-UnixMs $t.startTime
+    } else {
+      try { $expectedMs = Get-UnixMs ([DateTime]::Parse([string]$t.startTime)) } catch { $expectedMs = $null }
+    }
   }
   if (-not $expectedMs -or -not $actualMs) {
     return @{ reused = $false; verified = $false }

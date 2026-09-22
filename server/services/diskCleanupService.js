@@ -5,7 +5,9 @@
  * 闸门（全部写进代码）：
  *   1. 默认 dry-run，不传 dryRun:false 就不删
  *   2. 只删词典白名单里的路径，清单外一律拒绝
- *   3. 路径必须足够深（禁止 C:\、C:\Windows、C:\Users 这种根目录）
+ *   3. 路径必须足够深：盘根，以及各本地盘符下的系统目录本身
+ *      （Windows / Windows\System32 / Program Files / Program Files (x86) / ProgramData / Users）
+ *      一律禁止。盘符动态取，不写死 C:/D:。子树放行由白名单把关（见 plan）。
  *   4. 真实执行必须 confirmed=true
  *   5. caution 项必须被显式选中，默认计划只含 safe
  *   6. 审计日志 logs/disk-cleanup-YYYYMMDD.log
@@ -16,20 +18,58 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { locate, expand, loadDict } = require('./junkLocator');
+const { listLocalDrives } = require('../collectors/diskSpace');
 
 const WS = path.join(__dirname, '..', '..');
 const LOG_DIR = path.join(WS, 'logs');
 
-const FORBIDDEN_PREFIXES = [
-  'C:\\',
-  'D:\\',
-  'C:\\Windows',
-  'C:\\Windows\\System32',
-  'C:\\Program Files',
-  'C:\\Program Files (x86)',
-  'C:\\Users',
-  'C:\\ProgramData'
-].map(p => path.resolve(p).toLowerCase());
+/**
+ * 每个盘符下都不允许直接清理的系统级目录（相对盘根）。
+ * 刻意不复用 diskSpace.js 的 C_TOP：那个常量是「扫描哪些一级目录」的性能取舍，
+ * 这里是「不许删」的安全边界，两者的变更理由不同，不该互相牵动。
+ */
+const FORBIDDEN_SUBDIRS = [
+  'Windows',
+  'Windows\\System32',
+  'Program Files',
+  'Program Files (x86)',
+  'ProgramData',
+  'Users'
+];
+
+/**
+ * 禁止清理的路径集合 = 本机每个本地盘符 × FORBIDDEN_SUBDIRS，外加盘符根（X:\）。
+ *
+ * 为什么动态生成：原先硬编码只有 C:\ 与 D:\，一旦系统装在别的盘、或机器上还有 E:/F:，
+ * E:\Windows 这类系统目录就完全落不到拦截范围内 —— 这是磁盘删除的最后一道路径防线。
+ *
+ * 口径说明：本集合只拦「盘根」与「系统目录本身」，**不拦其子树**。
+ * C:\Windows\Temp、C:\Windows\SoftwareDistribution\Download、
+ * C:\Users\<用户>\AppData\Local\Temp 这些合法清理目标必须放行
+ * （既有断言：diskCleanup.test.js 与 e2e T5.8）。子树层面的把关交给白名单。
+ *
+ * 惰性求值 + 缓存：listLocalDrives() 要起一次 PowerShell，不在模块加载期跑。
+ */
+let forbiddenCache = null;
+function forbiddenPaths() {
+  if (forbiddenCache) return forbiddenCache;
+  let drives = [];
+  try {
+    drives = listLocalDrives();
+  } catch (e) {
+    drives = [];
+  }
+  if (!drives.length) drives = [process.env.SystemDrive || 'C:'];
+  const list = [];
+  for (const d of drives) {
+    const root = String(d).trim().replace(/[\\/]+$/, '').toUpperCase();
+    if (!/^[A-Z]:$/.test(root)) continue;
+    list.push(normalize(root + '\\'));
+    for (const sub of FORBIDDEN_SUBDIRS) list.push(normalize(root + '\\' + sub));
+  }
+  forbiddenCache = list;
+  return list;
+}
 
 function ensureDir(d) {
   try { fs.mkdirSync(d, { recursive: true }); } catch (e) { }
@@ -51,10 +91,11 @@ function normalize(p) {
 function isForbidden(expanded) {
   const n = normalize(expanded);
   const parts = n.split(path.sep).filter(Boolean);
-  // C:\ 或 D:\ 这种只有盘符
+  // X:\ 这种只有盘符
   if (parts.length <= 1) return true;
-  // 精确等于禁止前缀（例如正好是 C:\Windows，而不是 C:\Windows\Temp）
-  for (const f of FORBIDDEN_PREFIXES) {
+  // 精确等于禁止路径（例如正好是 C:\Windows，而不是 C:\Windows\Temp）；
+  // 刻意不拦子树 —— 子树由白名单把关，否则会误伤 C:\Windows\Temp 这类合法清理目标。
+  for (const f of forbiddenPaths()) {
     if (n === f) return true;
   }
   return false;
@@ -284,4 +325,4 @@ function execute(opts = {}) {
   };
 }
 
-module.exports = { plan, execute, isForbidden, whitelistSet, deleteContents };
+module.exports = { plan, execute, isForbidden, forbiddenPaths, FORBIDDEN_SUBDIRS, whitelistSet, deleteContents };

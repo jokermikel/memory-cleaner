@@ -1,6 +1,7 @@
 {
   "_meta": {
-    "说明": "磁盘垃圾分类词典。路径全部经本机实测。risk=safe 默认可清；caution 可能含用户数据，默认不勾选；protected 禁止清理。回收站路径由代码按本机盘符动态注入。",
+    "说明": "磁盘垃圾分类词典。路径为常见默认位置，均已在 Windows 11 上验证存在性。risk=safe 默认可清；caution 可能含用户数据，默认不勾选；protected 禁止清理。回收站路径由代码按本机盘符动态注入。",
+    "note_说明": "note 里的「示例量级」只是量级参考，不是本机数值——真实大小由界面/CLI 的实时扫描给出。换机器后条目可能存在也可能不存在。",
     "单位": "bytes 为扫描时快照，每次运行会重测"
   },
   "entries": [
@@ -12,7 +13,7 @@
       "risk": "safe",
       "vendor": "系统",
       "paths": ["%TEMP%"],
-      "note": "本机实测约 926 MB"
+      "note": "示例量级：数百 MB（因机器而异）"
     },
     {
       "id": "win-update-cache",
@@ -22,7 +23,7 @@
       "risk": "safe",
       "vendor": "Microsoft",
       "paths": ["C:\\Windows\\SoftwareDistribution\\Download"],
-      "note": "本机实测约 286 MB"
+      "note": "示例量级：数百 MB（因机器而异）"
     },
     {
       "id": "win-logs",
@@ -32,7 +33,7 @@
       "risk": "safe",
       "vendor": "Microsoft",
       "paths": ["C:\\Windows\\Logs"],
-      "note": "本机实测约 186 MB；部分文件可能正在被占用"
+      "note": "示例量级：数十至数百 MB（因机器而异）；部分文件可能正在被占用，删不掉的会被跳过"
     },
     {
       "id": "win-temp",
@@ -52,7 +53,7 @@
       "risk": "safe",
       "vendor": "系统",
       "paths": ["%LOCALAPPDATA%\\CrashDumps"],
-      "note": "本机实测约 46 MB"
+      "note": "示例量级：数十 MB（因机器而异）"
     },
     {
       "id": "thumbcache",
@@ -62,7 +63,7 @@
       "risk": "safe",
       "vendor": "Microsoft",
       "paths": ["%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer"],
-      "note": "本机实测约 70 MB"
+      "note": "示例量级：数十 MB（因机器而异）"
     },
     {
       "id": "d3d-shader-cache",
@@ -72,7 +73,7 @@
       "risk": "safe",
       "vendor": "Microsoft",
       "paths": ["%LOCALAPPDATA%\\D3DSCache"],
-      "note": "本机实测约 322 MB"
+      "note": "示例量级：数百 MB（因机器而异）"
     },
     {
       "id": "nvidia-dxcache",
@@ -82,7 +83,7 @@
       "risk": "safe",
       "vendor": "NVIDIA",
       "paths": ["%LOCALAPPDATA%\\NVIDIA\\DXCache", "%LOCALAPPDATA%\\NVIDIA\\GLCache"],
-      "note": "本机实测约 15.39 GB，是本机最大可清理项"
+      "note": "示例量级：数 GB，通常是最大的可清理项（因机器而异）"
     },
     {
       "id": "edge-cache",
@@ -95,7 +96,7 @@
         "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\Cache",
         "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\Code Cache"
       ],
-      "note": "本机实测约 648 MB"
+      "note": "示例量级：数百 MB（因机器而异）"
     },
     {
       "id": "quark-cache",
@@ -108,7 +109,7 @@
         "%LOCALAPPDATA%\\Quark\\User Data\\Default\\Cache",
         "%LOCALAPPDATA%\\Quark\\User Data\\Default\\Code Cache"
       ],
-      "note": "本机实测约 182 MB"
+      "note": "示例量级：数十至数百 MB（因机器而异）"
     },
     {
       "id": "steam-htmlcache",
@@ -118,7 +119,7 @@
       "risk": "safe",
       "vendor": "Valve",
       "paths": ["%LOCALAPPDATA%\\Steam\\htmlcache"],
-      "note": "本机实测约 637 MB"
+      "note": "示例量级：数百 MB（因机器而异）"
     },
     {
       "id": "pnpm-cache",
@@ -128,7 +129,7 @@
       "risk": "safe",
       "vendor": "pnpm",
       "paths": ["%LOCALAPPDATA%\\pnpm-cache"],
-      "note": "本机实测约 328 MB"
+      "note": "示例量级：数百 MB（因机器而异）"
     },
     {
       "id": "uv-cache",
@@ -138,7 +139,7 @@
       "risk": "safe",
       "vendor": "Astral",
       "paths": ["%LOCALAPPDATA%\\uv"],
-      "note": "本机实测约 173 MB"
+      "note": "示例量级：数十至数百 MB（因机器而异）"
     },
     {
       "id": "pip-cache",
@@ -148,7 +149,7 @@
       "risk": "safe",
       "vendor": "Python",
       "paths": ["%LOCALAPPDATA%\\pip"],
-      "note": "本机实测约 56 MB"
+      "note": "示例量级：数十 MB（因机器而异）"
     },
     {
       "id": "hf-cache",
@@ -158,7 +159,7 @@
       "risk": "caution",
       "vendor": "Hugging Face",
       "paths": ["%USERPROFILE%\\.cache\\huggingface"],
-      "note": "本机实测约 264 MB；若正在做 AI 开发请谨慎删除"
+      "note": "示例量级：数百 MB 起，模型越多越大（因机器而异）；正在做 AI 开发时请谨慎删除"
     },
     {
       "id": "user-dot-cache",
@@ -168,7 +169,7 @@
       "risk": "caution",
       "vendor": "多个",
       "paths": ["%USERPROFILE%\\.cache"],
-      "note": "本机实测约 2.72 GB，与 hf-cache 有重叠，定位器会去重"
+      "note": "示例量级：数 GB（因机器而异）；与 hf-cache 有重叠，定位器会去重"
     },
     {
       "id": "qqlive-roaming",
@@ -178,7 +179,7 @@
       "risk": "caution",
       "vendor": "Tencent",
       "paths": ["%APPDATA%\\Tencent\\QQLive"],
-      "note": "本机实测约 1.90 GB，默认不勾选"
+      "note": "示例量级：数 GB（因机器而异）；默认不勾选"
     },
     {
       "id": "wechat-xwechat",
@@ -188,7 +189,7 @@
       "risk": "caution",
       "vendor": "Tencent",
       "paths": ["%APPDATA%\\Tencent\\xwechat"],
-      "note": "本机实测约 1.30 GB，默认不勾选"
+      "note": "示例量级：数 GB（因机器而异）；默认不勾选"
     },
     {
       "id": "wechat-legacy",
@@ -198,7 +199,7 @@
       "risk": "caution",
       "vendor": "Tencent",
       "paths": ["%APPDATA%\\Tencent\\WeChat"],
-      "note": "本机实测约 982 MB，默认不勾选"
+      "note": "示例量级：数百 MB 至数 GB（因机器而异）；默认不勾选"
     },
     {
       "id": "recycle",

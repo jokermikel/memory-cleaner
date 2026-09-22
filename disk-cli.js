@@ -14,7 +14,7 @@
 
 const path = require('path');
 const ws = process.cwd();
-const { runScan } = require(path.join(ws, 'server/collectors/diskSpace'));
+const { runScan, buildJunkPaths, C_TOP } = require(path.join(ws, 'server/collectors/diskSpace'));
 const { fmt, volumes } = require(path.join(ws, 'server/services/diskService'));
 const { locate } = require(path.join(ws, 'server/services/junkLocator'));
 const { analyze } = require(path.join(ws, 'server/services/diskAnalyzer'));
@@ -64,16 +64,20 @@ function printDrive(r) {
   }
 }
 
-const C_TOP = ['Users', 'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData'];
-const C_JUNK = [
-  'C:\\Windows\\Temp',
-  'C:\\Windows\\SoftwareDistribution\\Download',
-  '%TEMP%',
-  '%LOCALAPPDATA%\\Temp',
-  '%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache',
-  '%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer',
-  '%LOCALAPPDATA%\\CrashDumps'
-];
+// 一级目录清单与垃圾路径清单都复用 server 侧的权威定义，避免 CLI 与 Web 各维护一份
+// 而逐渐分叉（历史问题：此处的 C_JUNK 少了回收站，与 Web 端扫出来的清单不一致）。
+// C_TOP 由 diskSpace.js 导入。
+//
+// 垃圾路径的取用规则与 Web 端 scanDisks() 保持一致：
+//   - 系统盘：该盘符开头的路径 + 环境变量类（%TEMP% 等，展开后多落在系统盘）
+//   - 非系统盘：只取该盘符开头的路径
+function junkForDrive(drive) {
+  const d = String(drive).toUpperCase();
+  const sysDrive = String(process.env.SystemDrive || 'C:').toUpperCase();
+  return buildJunkPaths().filter(p =>
+    d === sysDrive ? (p.startsWith(d) || p.startsWith('%')) : p.startsWith(d)
+  );
+}
 
 
 function printInspect(target) {
@@ -161,10 +165,10 @@ if (arg === 'inspect') {
   printMigrate(process.argv[3], process.argv[4]);
 } else if (arg === 'c' || arg === 'c:') {
   console.log('\n正在扫描 C: …');
-  printDrive(runScan('C:', C_TOP, C_JUNK));
+  printDrive(runScan('C:', C_TOP, junkForDrive('C:')));
 } else if (arg === 'd' || arg === 'd:') {
   console.log('\n正在扫描 D: …');
-  printDrive(runScan('D:', [], ['D:\\$Recycle.Bin']));
+  printDrive(runScan('D:', [], junkForDrive('D:')));
 } else if (arg === 'apps') {
   printVolumes();
   console.log('\n正在按应用归类（30~60 秒）…');

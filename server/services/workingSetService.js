@@ -137,9 +137,13 @@ function execute(opts = {}) {
 
     const after = getSnapshot();
     const succeeded = results.filter(r => r.ok);
-    const freedBytes = Math.max(0, before.system.usedBytes - after.system.usedBytes);
-    const realFreedBytes = succeeded.length > 0 ? freedBytes : 0;
+    // 释放量口径：各成功进程工作集的实际下降量之和。
+    // 修剪不结束进程，进程仍在运行，所以可用 wsAfter 精确衡量；
+    // 不再用整机前后差值（含其它进程自然波动）。
     const wsDelta = results.reduce((s, r) => s + Math.max(0, (r.wsBefore || 0) - (r.wsAfter || 0)), 0);
+    const realFreedBytes = succeeded.length > 0 ? wsDelta : 0;
+    // 整机前后差值仅作对照，不参与「释放量」上报。
+    const systemDeltaBytes = Math.max(0, before.system.usedBytes - after.system.usedBytes);
 
     const failReasons = {};
     for (const r of results) {
@@ -150,8 +154,9 @@ function execute(opts = {}) {
     if (parseIssue && results.length === 0) failReasons[parseIssue] = procs.length;
 
     audit(`EXECUTED 请求修剪 ${procs.length} 个进程，成功 ${succeeded.length} 个；` +
-      `工作集合计下降 ${(wsDelta / 1048576).toFixed(1)}MB；` +
-      `系统已用 ${(before.system.usedBytes / 1048576).toFixed(1)}MB → ${(after.system.usedBytes / 1048576).toFixed(1)}MB`);
+      `释放 ${(realFreedBytes / 1048576).toFixed(1)}MB（各成功进程工作集实际下降量之和）；` +
+      `整机已用 ${(before.system.usedBytes / 1048576).toFixed(1)}MB → ${(after.system.usedBytes / 1048576).toFixed(1)}MB` +
+      `（差值 ${(systemDeltaBytes / 1048576).toFixed(1)}MB 含自然波动，仅对照）`);
 
     return {
       mode: 'executed',
@@ -162,10 +167,11 @@ function execute(opts = {}) {
       failed: results.length - succeeded.length,
       workingSetDeltaBytes: wsDelta,
       freedBytes: realFreedBytes,
-      systemDeltaBytes: freedBytes,
-      systemDeltaNote: succeeded.length === 0
-        ? '没有任何进程被成功修剪，系统内存差值为自然波动，不代表清理效果'
-        : '工作集修剪只是建议性收缩，进程仍在运行；系统可用内存不一定等量上升',
+      freedBytesNote: succeeded.length === 0
+        ? '没有任何进程被成功修剪，本次释放量为 0'
+        : '释放量 = 各成功修剪进程工作集的实际下降量之和（本次动作可归因部分）',
+      systemDeltaBytes,
+      systemDeltaNote: '工作集修剪只是建议性收缩，进程仍在运行；整机已用内存前后差值含其它进程自然波动，仅供参考，不作为释放量',
       beforeUsedBytes: before.system.usedBytes,
       afterUsedBytes: after.system.usedBytes,
       beforePercent: before.system.usedPercent,

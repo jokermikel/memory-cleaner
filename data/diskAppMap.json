@@ -1,7 +1,9 @@
 {
   "_meta": {
     "说明": "磁盘路径 → 应用名映射。pathPrefix 相对于盘符或绝对路径，按最长前缀优先匹配。",
-    "更新": "2026-09-18 本机实测"
+    "更新": "2026-09-22 示例字典",
+    "注意": "本表是**示例字典**，条目随作者本机安装路径而定，并非通用清单。换机器后请按本机实际安装目录调整；未命中的目录会归入「X 其他」分组，不影响功能，只影响归类可读性。系统盘符请用 %SystemDrive% 或在运行时按 SystemDrive 推导，勿写死盘符。",
+    "匹配规则": "prefix 会先展开环境变量再 path.resolve().toLowerCase()，比较时要求精确相等或以 prefix + 路径分隔符开头（故 'D:\\\\steam' 不会误匹配 'D:\\\\Steam++'）。"
   },
   "maps": [
     {
@@ -23,7 +25,8 @@
       "name": "游戏目录 youxi",
       "purpose": "D 盘游戏合集目录（非 Steam）",
       "category": "游戏",
-      "vendor": "本地"
+      "vendor": "本地",
+      "_示例": "纯本机专属目录，换机器后多半不存在；保留以保证示例完整，可自行删除。"
     },
     {
       "prefix": "D:\\SeasunMechaBREAKCN",
@@ -100,7 +103,8 @@
       "name": "IntelliJ IDEA",
       "purpose": "JetBrains Java IDE",
       "category": "开发",
-      "vendor": "JetBrains"
+      "vendor": "JetBrains",
+      "_示例": "含版本号的目录名属示例条目；本表按精确前缀匹配，末尾带版本号时不会匹配其他版本目录。换机器请按本机实际安装目录名调整前缀。"
     },
     {
       "prefix": "D:\\pycharm",

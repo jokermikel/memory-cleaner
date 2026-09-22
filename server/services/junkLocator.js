@@ -10,6 +10,18 @@ const { runScan } = require('../collectors/diskSpace');
 
 const DICT_PATH = path.join(__dirname, '..', '..', 'data', 'junkDict.zh.json');
 
+/**
+ * 传给 diskScan.ps1 -TopDirs 的哨兵值。
+ *
+ * locate() 只消费返回值里的 junkPaths，不需要任何一级目录数据。而 -TopDirs 传空
+ * 会让脚本走 Get-ChildItem 枚举该盘全部一级目录并逐个 robocopy 量大小
+ * （实测本机 D 盘 78 个目录 ≈ 38s），纯属浪费。
+ *
+ * 传这个哨兵名只会让脚本尝试量算这一个（不存在的）目录，Test-Path 即返回，
+ * 成本可忽略；名字自解释，不会被误认为真实业务目录。
+ */
+const NO_TOP_DIR_SENTINEL = '__cc_no_top_dirs__';
+
 function loadDict() {
   return JSON.parse(fs.readFileSync(DICT_PATH, 'utf8'));
 }
@@ -33,6 +45,9 @@ function locate() {
   const entries = dict.entries || [];
   const { listLocalDrives } = require('../collectors/diskSpace');
 
+  // 系统盘取环境变量，不写死 'C:'（系统装在 D/E 盘的机器同样正确）。
+  const sysDrive = (process.env.SystemDrive || 'C:');
+
   // 收集全部路径（去重相同展开路径）
   // 回收站条目（id 以 recycle 开头）动态展开到所有本地盘符，
   // 不写死 C:/D:。其它条目按词典原样展开。
@@ -53,8 +68,16 @@ function locate() {
   }
 
   // 一次 robocopy 扫完（pathSet 已含所有盘符的回收站）
+  //
+  // 盘符：取系统盘而非硬编码 'C:'（系统装在 D/E 盘的机器也能扫对）。
+  //       实测 -Drive 只影响结果里的 drive 回显，-JunkList 的展开与量算与之无关。
+  // topDirs：这里传一个「哨兵目录名」而不是空数组。
+  //       空数组会让 diskScan.ps1 走 Get-ChildItem 枚举该盘全部一级目录并逐个
+  //       robocopy 量大小（本机 D 盘 78 个目录 ≈ 38s，纯浪费）；
+  //       传一个几乎不可能存在的名字则只会尝试量算这一个目录，成本可忽略。
+  //       本函数只需要 junkPaths，不需要任何 topDirs 数据。
   const junkList = pathSet.map(x => x.original);
-  const scanned = runScan('C:', ['tmp'], junkList);
+  const scanned = runScan(sysDrive, [NO_TOP_DIR_SENTINEL], junkList);
 
   const byExpanded = new Map();
   for (const j of scanned.junkPaths || []) {
@@ -116,4 +139,4 @@ function locate() {
   };
 }
 
-module.exports = { locate, loadDict, expand, isSubPath };
+module.exports = { locate, loadDict, expand, isSubPath, NO_TOP_DIR_SENTINEL };

@@ -203,6 +203,7 @@ function handleCleanupPlan(query, res) {
  * 执行清理。安全闸门：
  *   - 默认 dryRun=true（只回计划）
  *   - 真实执行需要 body.confirmed === true
+ *   - 计划进程数超过 20 时还需 body.acknowledgeBatchLimit === true（force 不再放行批量）
  *   - 选中保护进程会返回 403
  */
 async function handleCleanupExecute(req, res) {
@@ -218,6 +219,7 @@ async function handleCleanupExecute(req, res) {
       appKeys: Array.isArray(body.appKeys) ? body.appKeys : undefined,
       pids: Array.isArray(body.pids) ? body.pids : undefined,
       force: body.force === true,
+      acknowledgeBatchLimit: body.acknowledgeBatchLimit === true,
       confirmed: body.confirmed === true,
       dryRun: body.dryRun !== false,
       minMb: Number.isFinite(body.minMb) ? body.minMb : 0

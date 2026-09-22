@@ -326,7 +326,10 @@
 
   <footer id="footer"></footer>
 
-  <!-- 清理面板（仅在通过服务打开时可用） -->
+  <!-- 清理面板：两种模式下都会显示，但**功能**只在「通过服务打开」时可用。
+       服务模式下渲染计划/执行按钮；本地文件（file://）模式下按钮禁用并提示改用
+       服务地址打开——保留面板是为了让用户看到这条引导，而不是把入口藏起来。
+       （即便本地模式下误发请求，服务端也会以 403 UNAUTHORIZED 拒绝。） -->
   <section class="cleanup-panel" id="cleanupPanel" style="display:none">
     <div class="cleanup-head">
       <div>
@@ -429,6 +432,10 @@
 
 <script>
 const DATA = __SNAPSHOT_DATA__;
+// 服务端返回首页时会把下面这个占位符替换成「本次启动的一次性访问令牌」。
+// 若它原样留在页面里，说明页面是以本地文件（file://）方式打开的，或服务未注入令牌，
+// 此时写操作会被服务端以 403 UNAUTHORIZED 拒绝，前端据此提示用户改用服务地址打开。
+window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
 </script>
 <script>
 (function(){
@@ -447,6 +454,100 @@ const DATA = __SNAPSHOT_DATA__;
   let s = snapshot.system;
   let apps = snapshot.apps;
   const ramPicked = new Set();
+
+  // ───── 访问令牌（防跨站触发清理）─────
+  // 后端对写接口（POST 等）强制校验 X-CC-Token；读接口不校验。
+  // 令牌由服务端在返回首页时注入，外部网页受同源策略限制读不到，因此拿不到令牌。
+  const TOKEN_PLACEHOLDER = '__CC_TOKEN_VALUE__';
+  const CC_TOKEN = (window.__CC_TOKEN__ && window.__CC_TOKEN__ !== TOKEN_PLACEHOLDER)
+    ? window.__CC_TOKEN__ : null;
+  const HAS_TOKEN = !!CC_TOKEN;
+
+  /**
+   * 带访问令牌的 fetch 包装。所有 /api 请求都必须走它，
+   * 否则写操作会因缺少令牌被服务端拒绝。
+   */
+  function apiFetch(url, opts){
+    const o = Object.assign({}, opts || {});
+    const headers = Object.assign({}, o.headers || {});
+    if(HAS_TOKEN) headers['X-CC-Token'] = CC_TOKEN;
+    o.headers = headers;
+    return fetch(url, o);
+  }
+
+  /**
+   * 把服务端的错误对象翻成用户能看懂的一句话。
+   * 重点处理鉴权类错误：本地文件模式下用户会看到「请通过服务打开」而不是一串英文码。
+   */
+  function apiErrorText(r, fallback){
+    const e = r && r.error;
+    if(!e) return fallback || '请求失败';
+    if(e.code === 'UNAUTHORIZED'){
+      return '无法执行：本页面没有有效的访问令牌。\n\n'
+        + '清理功能需要在「通过服务打开」的界面里使用 —— 请先启动服务，'
+        + '再用浏览器访问 http://127.0.0.1:7788 。\n\n'
+        + '（直接双击打开本 HTML 文件时，出于安全考虑写操作会被拒绝）';
+    }
+    if(e.code === 'BAD_ORIGIN' || e.code === 'BAD_HOST'){
+      return '无法执行：页面来源不被信任。\n\n' + (e.message || '');
+    }
+    return e.message || fallback || '请求失败';
+  }
+
+  // ───── 批量上限闸门 ─────
+  // BATCH_LIMIT 必须与 server/services/cleanupService.js 里的同名常量保持一致。
+  // 注意：`force` 只代表「优雅关闭失败后强制结束」，不代表「放行批量」。
+  //       计划进程数超过上限时，必须由用户在弹出的警示里显式知悉，
+  //       再单独传 acknowledgeBatchLimit:true；拿 force 顶替等于这道闸门不存在。
+  const BATCH_LIMIT = 20;
+
+  /**
+   * 统计所选应用的进程总数，并在超限时给出要追加到确认弹窗里的警示行。
+   * @param {Array} chosen 已勾选的应用
+   * @returns {{processCount:number, overLimit:boolean, warnLine:string}}
+   */
+  function batchInfo(chosen){
+    const processCount = chosen.reduce((s, a) => s + (a.processCount || 0), 0);
+    const overLimit = processCount > BATCH_LIMIT;
+    const warnLine = overLimit
+      ? '\n\n⚠ 本次将关闭 ' + processCount + ' 个进程，超过 ' + BATCH_LIMIT + ' 个批量上限。\n' +
+        '点「确定」表示你已知悉，并同意一次性关闭这么多进程。'
+      : '';
+    return { processCount: processCount, overLimit: overLimit, warnLine: warnLine };
+  }
+
+  /** 组装 /api/cleanup/execute 的请求体：只有用户已知悉超限时才带 acknowledgeBatchLimit */
+  function cleanupBody(chosen, batch){
+    const body = {
+      appKeys: chosen.map(a => a.key),
+      dryRun: false,
+      confirmed: true,
+      force: true
+    };
+    if(batch && batch.overLimit) body.acknowledgeBatchLimit = true;
+    return body;
+  }
+
+  /**
+   * 提交清理请求。
+   * 服务端会用自己的快照重算进程数，可能与前端计数不一致（快照刷新间隙）。
+   * 若因此被判超限，就问用户一次；同意后再带 acknowledgeBatchLimit 重试一次——
+   * 闸门仍然要求「用户明确知悉」，只是把知悉的时机挪到服务端回话之后。
+   */
+  async function sendCleanup(body){
+    const post = async (b) => (await apiFetch('/api/cleanup/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(b)
+    })).json();
+    let r = await post(body);
+    if(r && r.error && r.error.code === 'BATCH_LIMIT'){
+      const again = confirm('服务端复核后的进程数超过了 ' + BATCH_LIMIT + ' 个批量上限。\n\n' +
+        apiErrorText(r) + '\n\n是否仍然继续？');
+      if(again) r = await post(Object.assign({}, body, { acknowledgeBatchLimit: true }));
+    }
+    return r;
+  }
 
   function paintOverview(){
     document.getElementById('subline').textContent =
@@ -504,7 +605,7 @@ const DATA = __SNAPSHOT_DATA__;
 
   async function refreshSnapshot(){
     try {
-      const data = await (await fetch('/api/memory/snapshot', { cache:'no-store' })).json();
+      const data = await (await apiFetch('/api/memory/snapshot', { cache:'no-store' })).json();
       applySnapshot(data);
       return true;
     } catch(e) {
@@ -561,7 +662,7 @@ const DATA = __SNAPSHOT_DATA__;
       }
     }
 
-    fetch('/api/privilege/status')
+    apiFetch('/api/privilege/status')
       .then(r => r.ok ? r.json() : null)
       .then(st => { applyStatus(st); })
       .catch(() => { btn.hidden = true; });
@@ -571,7 +672,7 @@ const DATA = __SNAPSHOT_DATA__;
       while(Date.now() - start < timeoutMs){
         await new Promise(r => setTimeout(r, 800));
         try {
-          const st = await (await fetch('/api/privilege/status', { cache:'no-store' })).json();
+          const st = await (await apiFetch('/api/privilege/status', { cache:'no-store' })).json();
           if(st && st.isAdmin) return st;
         } catch(e) { /* 旧服务关掉、新服务还没起来，继续等 */ }
       }
@@ -584,13 +685,13 @@ const DATA = __SNAPSHOT_DATA__;
       btn.textContent = '正在请求提权…';
       setMsg('将弹出 Windows 用户账户控制，请点击「是」。');
       try {
-        const r = await (await fetch('/api/privilege/elevate', {
+        const r = await (await apiFetch('/api/privilege/elevate', {
           method:'POST',
           headers:{ 'Content-Type':'application/json' },
           body: JSON.stringify({})
         })).json();
         if(r.error){
-          setMsg('提权失败：' + r.error.message, true);
+          setMsg('提权失败：' + apiErrorText(r), true);
           btn.disabled = false;
           btn.textContent = '🛡️ 提升权限';
           return;
@@ -633,7 +734,7 @@ const DATA = __SNAPSHOT_DATA__;
   const chkAllSafe = document.getElementById('chkAllSafe');
   const ramSelResult = document.getElementById('ramSelResult');
 
-  fetch('/api/health').then(r => r.ok ? r.json() : null).then(d => {
+  apiFetch('/api/health').then(r => r.ok ? r.json() : null).then(d => {
     ramServiceMode = !!(d && d.status === 'ok');
     if(!ramServiceMode){
       ramSelSummary.textContent = '当前是本地文件模式。要用勾选删除，请运行 启动.bat 后从 http://127.0.0.1:7788/ 打开。';
@@ -768,26 +869,24 @@ const DATA = __SNAPSHOT_DATA__;
     if(!chosen.length) return;
     const caution = chosen.filter(a => a.risk==='caution');
     const bytes = chosen.reduce((s,a)=>s+a.workingSetBytes,0);
+    const batch = batchInfo(chosen);
     let msg = '确认结束 ' + chosen.length + ' 个应用？\n\n' +
       chosen.map(a=>'· '+a.name+'  '+fmt(a.workingSetBytes)).join('\n') +
       '\n\n预计释放 ' + fmt(bytes) + '\n未保存的内容会丢失。\n只结束进程，不会强制清空系统待机内存。';
     if(caution.length){
       msg += '\n\n⚠ 含 '+caution.length+' 个谨慎项：' + caution.map(a=>a.name).join('、') + '。结束可能影响正在使用的程序。';
     }
+    msg += batch.warnLine;
     if(!confirm(msg)) return;
     btnRamKill.disabled = true;
     btnRamKill.textContent = '正在结束…';
     ramSelResult.style.display = 'none';
     try {
-      const r = await (await fetch('/api/cleanup/execute', {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({ appKeys: chosen.map(a=>a.key), dryRun:false, confirmed:true, force:true })
-      })).json();
+      const r = await sendCleanup(cleanupBody(chosen, batch));
       ramSelResult.style.display = '';
       if(r.error){
         ramSelResult.className = 'cleanup-result result-warn';
-        ramSelResult.innerHTML = '<strong>执行被拒绝：</strong>' + r.error.message;
+        ramSelResult.innerHTML = '<strong>执行被拒绝：</strong>' + apiErrorText(r);
       } else {
         const ok = r.succeeded > 0;
         ramSelResult.className = 'cleanup-result ' + (ok ? 'result-ok' : 'result-warn');
@@ -845,7 +944,7 @@ const DATA = __SNAPSHOT_DATA__;
 
     // 检测是否为服务模式：能访问同源 API 才启用清理
     let serviceMode = false;
-    fetch('/api/health', { method:'GET' })
+    apiFetch('/api/health', { method:'GET' })
       .then(r => r.ok ? r.json() : null)
       .then(d => {
         serviceMode = !!(d && d.status === 'ok');
@@ -874,7 +973,7 @@ const DATA = __SNAPSHOT_DATA__;
       btnPlan.disabled = true;
       btnPlan.textContent = '正在生成…';
       try {
-        const list = await (await fetch('/api/cleanup/plan')).json();
+        const list = await (await apiFetch('/api/cleanup/plan')).json();
         currentPlan = list;
         picked.clear();
         list.apps.forEach(a => picked.add(a.key));
@@ -939,7 +1038,7 @@ const DATA = __SNAPSHOT_DATA__;
       btnTrim.disabled = true;
       btnTrim.textContent = '正在修剪…';
       try {
-        const r = await (await fetch('/api/cleanup/trim', {
+        const r = await (await apiFetch('/api/cleanup/trim', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ appKeys: chosen.map(a=>a.key), dryRun:false, confirmed:true })
@@ -947,7 +1046,7 @@ const DATA = __SNAPSHOT_DATA__;
         resultBox.style.display = '';
         if(r.error){
           resultBox.className = 'cleanup-result result-warn';
-          resultBox.innerHTML = '<strong>修剪被拒绝：</strong>' + r.error.message;
+          resultBox.innerHTML = '<strong>修剪被拒绝：</strong>' + apiErrorText(r);
         } else {
           const ok = (r.succeeded||0) > 0;
           resultBox.className = 'cleanup-result ' + (ok ? 'result-ok' : 'result-warn');
@@ -973,23 +1072,20 @@ const DATA = __SNAPSHOT_DATA__;
       if(!currentPlan) return;
       const chosen = currentPlan.apps.filter(a => picked.has(a.key));
       const bytes = chosen.reduce((s,a)=>s+a.workingSetBytes,0);
+      const batch = batchInfo(chosen);
       if(!confirm('确认关闭 ' + chosen.length + ' 个应用？\n\n' +
         chosen.map(a=>'· '+a.name).join('\n') +
-        '\n\n预计释放 ' + fmt(bytes) + '\n未保存的内容会丢失。\n\n安全说明：只结束进程，不会调用未公开内核 API，也不会清空 Standby 内存列表。磁盘正在大文件下载/拷贝时会自动拒绝。')) return;
+        '\n\n预计释放 ' + fmt(bytes) + '\n未保存的内容会丢失。\n\n安全说明：只结束进程，不会调用未公开内核 API，也不会清空 Standby 内存列表。磁盘正在大文件下载/拷贝时会自动拒绝。' + batch.warnLine)) return;
 
       btnExec.disabled = true;
       btnExec.textContent = '正在清理…';
       try {
-        const r = await (await fetch('/api/cleanup/execute', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ appKeys: chosen.map(a=>a.key), dryRun:false, confirmed:true, force:true })
-        })).json();
+        const r = await sendCleanup(cleanupBody(chosen, batch));
 
         if(r.error){
           resultBox.style.display = '';
           resultBox.className = 'cleanup-result result-warn';
-          resultBox.innerHTML = '<strong>执行被拒绝：</strong>' + r.error.message;
+          resultBox.innerHTML = '<strong>执行被拒绝：</strong>' + apiErrorText(r);
         } else {
           renderResult(r);
         }
@@ -1045,7 +1141,7 @@ const DATA = __SNAPSHOT_DATA__;
 
     function loadVolumes(){
       const grid = document.getElementById('driveGrid');
-      fetch('/api/disk/volumes').then(r=>r.json()).then(d => {
+      apiFetch('/api/disk/volumes').then(r=>r.json()).then(d => {
         if(!d.drives) { grid.innerHTML = '<div class="card">请通过 启动.bat 打开服务后再查看磁盘</div>'; return; }
         grid.innerHTML = d.drives.map(v => {
           const pct = v.usedPercent || 0;
@@ -1071,7 +1167,7 @@ const DATA = __SNAPSHOT_DATA__;
       resultBox.style.display = '';
       if(r.error){
         resultBox.className = 'cleanup-result result-warn';
-        resultBox.innerHTML = '<strong>被拒绝：</strong>'+r.error.message;
+        resultBox.innerHTML = '<strong>被拒绝：</strong>'+apiErrorText(r);
         return;
       }
       const ok = (r.succeeded||0) > 0;
@@ -1094,7 +1190,7 @@ const DATA = __SNAPSHOT_DATA__;
     btnJunk.addEventListener('click', async () => {
       btnJunk.disabled = true; btnJunk.textContent = '扫描中…';
       try {
-        const d = await (await fetch('/api/disk/junk')).json();
+        const d = await (await apiFetch('/api/disk/junk')).json();
         junkPlan = d;
         pickedJunk.clear();
         d.items.filter(i => i.risk==='safe' && i.bytes>0).forEach(i => pickedJunk.add(i.id));
@@ -1141,7 +1237,7 @@ const DATA = __SNAPSHOT_DATA__;
       if(!confirm('确认删除以下缓存/临时文件？\n\n'+chosen.map(i=>'· '+i.name+'  '+fmt(i.bytes)).join('\n')+'\n\n预计 '+fmt(bytes)+'\n只删白名单路径，文档和游戏不会动。')) return;
       btnExec.disabled = true; btnExec.textContent = '正在删除…';
       try {
-        const r = await (await fetch('/api/disk/cleanup/execute', {
+        const r = await (await apiFetch('/api/disk/cleanup/execute', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ ids: chosen.map(i=>i.id), dryRun:false, confirmed:true })
         })).json();
@@ -1164,6 +1260,9 @@ const DATA = __SNAPSHOT_DATA__;
     const btnDiskAppDel = document.getElementById('btnDiskAppDel');
     const diskAppPicked = new Set();
     let diskAppData = [];
+    // 磁盘应用列表的截断与「显示全部」——对齐 RAM 页的做法（原先硬截断 40 条且无法展开）
+    const DISK_DEFAULT_SHOW = 40;
+    let diskAppShowAll = false;
 
     function junkForApp(app, items){
       const dirs = (app.dirs || []).map(d => String(d.path || '').replace(/\\+$/,'').toLowerCase()).filter(Boolean);
@@ -1202,7 +1301,8 @@ const DATA = __SNAPSHOT_DATA__;
 
     function renderDiskApps(){
       const listEl = document.getElementById('diskAppList');
-      const visible = diskAppData.slice(0, 40);
+      const totalCount = diskAppData.length;
+      const visible = diskAppShowAll ? diskAppData : diskAppData.slice(0, DISK_DEFAULT_SHOW);
       if(!visible.length){
         listEl.innerHTML = '<div class="cleanup-hint">没有扫到应用占用</div>';
         diskAppSelBar.style.display = 'none';
@@ -1226,6 +1326,17 @@ const DATA = __SNAPSHOT_DATA__;
           '<div class="app-meta">'+a.category+' · '+a.vendor+(checkable ? ' · 勾选后只删：'+junk.map(j=>j.name).join('、') : '')+'</div></div>' +
           '<div class="app-side"><div class="app-mem"><div class="m">'+fmt(a.bytes)+'</div><div class="p">占用</div></div></div></div>';
       }).join('');
+
+      // 显示全部按钮（对齐 RAM 页做法：大磁盘不再静默隐藏第 41 条之后的应用）
+      if(!diskAppShowAll && totalCount > DISK_DEFAULT_SHOW){
+        const btn = document.createElement('div');
+        btn.className = 'card';
+        btn.style.cssText = 'text-align:center;color:var(--primary);cursor:pointer;font-weight:600;padding:14px';
+        btn.textContent = '▾ 显示全部 ' + totalCount + ' 个应用（当前只显示前 ' + DISK_DEFAULT_SHOW + ' 个）';
+        btn.addEventListener('click', () => { diskAppShowAll = true; renderDiskApps(); });
+        listEl.appendChild(btn);
+      }
+
       listEl.querySelectorAll('.app-check input').forEach(cb => {
         cb.addEventListener('change', () => {
           if(cb.disabled) return;
@@ -1250,7 +1361,7 @@ const DATA = __SNAPSHOT_DATA__;
         '\n\n预计 '+fmt(sel.junkBytes)+'\n只删白名单路径，不会删除安装目录、游戏或文档。')) return;
       btnDiskAppDel.disabled = true; btnDiskAppDel.textContent = '正在删除…';
       try {
-        const r = await (await fetch('/api/disk/cleanup/execute', {
+        const r = await (await apiFetch('/api/disk/cleanup/execute', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ ids: sel.junkIds, dryRun:false, confirmed:true })
         })).json();
@@ -1291,7 +1402,7 @@ const DATA = __SNAPSHOT_DATA__;
       btnLoad.addEventListener('click', async () => {
         btnLoad.disabled = true; btnLoad.textContent = '加载中…';
         try {
-          const d = await (await fetch('/api/disk/migrate/presets')).json();
+          const d = await (await apiFetch('/api/disk/migrate/presets')).json();
           const items = d.items || [];
           sel.innerHTML = '<option value="">（手动填写源路径）</option>' + items.map(i =>
             '<option value="'+String(i.paths && i.paths[0] || '').replace(/"/g,'&quot;')+'">'+i.name+' — '+(i.paths&&i.paths[0]||'')+'</option>'
@@ -1316,13 +1427,13 @@ const DATA = __SNAPSHOT_DATA__;
         }
         btnCheck.disabled = true; btnCheck.textContent = '预检中…';
         try {
-          const r = await (await fetch('/api/disk/migrate/precheck', {
+          const r = await (await apiFetch('/api/disk/migrate/precheck', {
             method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({ source: src.value.trim(), destination: dst.value.trim(), linkType: typeEl.value })
           })).json();
           lastCheck = r;
           if(r.error){
-            showResult(false, '<strong>预检失败：</strong>'+r.error.message);
+            showResult(false, '<strong>预检失败：</strong>'+apiErrorText(r));
             btnExec.disabled = true;
             return;
           }
@@ -1352,7 +1463,7 @@ const DATA = __SNAPSHOT_DATA__;
         if(!confirm('确认把缓存搬走并在原位置建链接？\n\n源：'+src.value.trim()+'\n目标：'+dst.value.trim()+'\n类型：'+(typeEl.value==='symlink'?'符号链接 /D':'目录联接 /J')+'\n\n请先关闭占用该目录的程序。\n复制校验失败或建链失败会自动回滚，原数据不会丢。')) return;
         btnExec.disabled = true; btnExec.textContent = '正在迁移…';
         try {
-          const r = await (await fetch('/api/disk/migrate/execute', {
+          const r = await (await apiFetch('/api/disk/migrate/execute', {
             method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({
               source: src.value.trim(),
@@ -1363,7 +1474,7 @@ const DATA = __SNAPSHOT_DATA__;
             })
           })).json();
           if(r.error){
-            showResult(false, '<strong>迁移失败（已回滚）：</strong>'+r.error.message);
+            showResult(false, '<strong>迁移失败（已回滚）：</strong>'+apiErrorText(r));
           } else if(!r.executed){
             showResult(false, '<strong>未执行：</strong>'+(r.message || '仍是 dry-run'));
           } else {
@@ -1385,9 +1496,9 @@ const DATA = __SNAPSHOT_DATA__;
         const pth = (inspectPath.value || src.value || '').trim();
         if(!pth){ hint.textContent = '请填写要检查的路径'; return; }
         try {
-          const r = await (await fetch('/api/disk/migrate/inspect?path='+encodeURIComponent(pth))).json();
+          const r = await (await apiFetch('/api/disk/migrate/inspect?path='+encodeURIComponent(pth))).json();
           if(r.error){
-            showResult(false, '<strong>检查失败：</strong>'+r.error.message);
+            showResult(false, '<strong>检查失败：</strong>'+apiErrorText(r));
             return;
           }
           const kind = r.broken ? '断链' : (r.linkKind || r.type);
@@ -1410,11 +1521,12 @@ const DATA = __SNAPSHOT_DATA__;
       diskAppSelBar.style.display = 'none';
       try {
         const [d, junk] = await Promise.all([
-          (await fetch('/api/disk/apps')).json(),
-          junkPlan ? Promise.resolve(junkPlan) : (await fetch('/api/disk/junk')).json()
+          (await apiFetch('/api/disk/apps')).json(),
+          junkPlan ? Promise.resolve(junkPlan) : (await apiFetch('/api/disk/junk')).json()
         ]);
         if(!junkPlan) junkPlan = junk;
         diskAppPicked.clear();
+        diskAppShowAll = false;   // 重新扫描后回到折叠状态，避免上次的展开状态误导
         diskAppData = (d.apps || []).map(a => {
           const matched = junkForApp(a, junk.items || []);
           return Object.assign({}, a, { _junk: matched });

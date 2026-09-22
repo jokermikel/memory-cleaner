@@ -254,7 +254,7 @@ if ($Force -and $targets.Count -gt 0) {
         if (-not $sameTree) { continue }
         # BUG-1 fix: only sweep a process that started at/after this run began.
         # A same-named process that was already alive before the sweep is a real
-        # user process, not a respawn of the ones we just closed — leave it alone.
+        # user process, not a respawn of the ones we just closed -- leave it alone.
         $apStartMs = Get-UnixMs $ap.StartTime
         if ($null -eq $apStartMs -or $apStartMs -lt $sweepStartMs) { continue }
         $already = $false
