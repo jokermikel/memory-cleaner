@@ -188,11 +188,18 @@ const server = http.createServer((req, res) => {
       const htmlPath = path.join(__dirname, '..', '内存清理助手.html');
       if (fs.existsSync(htmlPath)) {
         const html = fs.readFileSync(htmlPath, 'utf8');
-        // 注入本次启动的一次性 token（模板里的占位符若未被替换，
-        // 说明页面是以本地文件方式打开的，前端会据此禁用写操作）
+        // 注入本次启动的一次性 token。
+        //
+        // ⚠ 必须**只替换 window.__CC_TOKEN__ 的赋值那一处**，绝不能用全局字符串替换：
+        //   模板里 '__CC_TOKEN_VALUE__' 这个字面量**还出现在前端常量 TOKEN_PLACEHOLDER
+        //   的定义中**。全局替换会把两处都换成同一个令牌，于是前端的
+        //   `window.__CC_TOKEN__ !== TOKEN_PLACEHOLDER` 恒为 false →
+        //   CC_TOKEN=null → HAS_TOKEN=false → 界面上所有需令牌的接口全部 403，
+        //   表现为「生成清理计划」报错、磁盘应用列表显示「没有扫到应用占用」。
+        //   （2026-09-23 真机验收实测发现；前端亦已改为格式校验，双重防护。）
         const withToken = html.replace(
-          new RegExp(TOKEN_PLACEHOLDER, 'g'),
-          ACCESS_TOKEN
+          /window\.__CC_TOKEN__\s*=\s*'__CC_TOKEN_VALUE__'/,
+          "window.__CC_TOKEN__ = '" + ACCESS_TOKEN + "'"
         );
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         return res.end(withToken);

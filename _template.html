@@ -456,11 +456,17 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
   const ramPicked = new Set();
 
   // ───── 访问令牌（防跨站触发清理）─────
-  // 后端对写接口（POST 等）强制校验 X-CC-Token；读接口不校验。
+  // 后端对写接口（POST 等）以及非豁免的读接口强制校验 X-CC-Token。
   // 令牌由服务端在返回首页时注入，外部网页受同源策略限制读不到，因此拿不到令牌。
-  const TOKEN_PLACEHOLDER = '__CC_TOKEN_VALUE__';
-  const CC_TOKEN = (window.__CC_TOKEN__ && window.__CC_TOKEN__ !== TOKEN_PLACEHOLDER)
-    ? window.__CC_TOKEN__ : null;
+  //
+  // ⚠ 判据用「格式校验」而不是「与占位符字面量比较」：
+  //   服务端对首页做的是字符串替换；只要模板里出现第二个同样的占位符字面量，
+  //   两处就会被替换成同一个值，`window.__CC_TOKEN__ !== TOKEN_PLACEHOLDER`
+  //   的判定便恒为 false —— 令牌明明注入了却被当成没有，界面上所有需令牌的
+  //   接口都会 403，且报错与令牌无关（表现为「生成计划失败」「没有扫到应用占用」），
+  //   极难排查。（2026-09-23 真机验收实测踩中，故改为按 64 位十六进制校验。）
+  const CC_TOKEN = (typeof window.__CC_TOKEN__ === 'string'
+    && /^[0-9a-f]{64}$/.test(window.__CC_TOKEN__)) ? window.__CC_TOKEN__ : null;
   const HAS_TOKEN = !!CC_TOKEN;
 
   /**
