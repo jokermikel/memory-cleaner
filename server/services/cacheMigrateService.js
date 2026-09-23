@@ -102,10 +102,29 @@ function isCriticalPath(p) {
   return { critical: false, reason: null };
 }
 
-function walkStats(root) {
+/**
+ * 遍历上限（缺陷 D1 修复）：
+ *   walkStats 是**同步**递归遍历。若目录规模过大（例如误把 C:\Windows 当成源），
+ *   会长时间阻塞 Node 的事件循环 —— 期间服务对任何请求（含毫秒级的 /api/health）
+ *   都不响应，连接堆积成 CLOSE_WAIT。
+ *   故加「耗时 + 文件数」双上限，任一超限即停止遍历并置 truncated=true，
+ *   由调用方（precheck）给出明确提示，而不是让整个服务假死。
+ */
+const WALK_MAX_MS = 3000;        // 单次遍历耗时上限（毫秒）
+const WALK_MAX_FILES = 200000;   // 文件数兜底上限
+
+function walkStats(root, limits = {}) {
+  const maxMs = limits.maxMs != null ? limits.maxMs : WALK_MAX_MS;
+  const maxFiles = limits.maxFiles != null ? limits.maxFiles : WALK_MAX_FILES;
+  const deadline = Date.now() + maxMs;
   let files = 0;
   let bytes = 0;
   let dirs = 0;
+  let truncated = false;
+
+  /** 已超限？（truncated 一旦置位，后续所有循环立即退出） */
+  const overLimit = () => truncated || files >= maxFiles || Date.now() > deadline;
+
   function walk(p) {
     let entries;
     try {
@@ -114,6 +133,7 @@ function walkStats(root) {
       return;
     }
     for (const e of entries) {
+      if (overLimit()) { truncated = true; return; }
       if (e.name === '.' || e.name === '..') continue;
       const full = path.join(p, e.name);
       let st;
@@ -129,7 +149,7 @@ function walkStats(root) {
     }
   }
   if (fs.existsSync(root)) walk(root);
-  return { files, bytes, dirs };
+  return { files, bytes, dirs, truncated };
 }
 
 function driveLetterOf(p) {
@@ -340,6 +360,8 @@ function precheck(src, dest, opts = {}) {
   const issues = [];
   const source = path.resolve(expand(src));
   const destination = path.resolve(expand(dest));
+  // ── 阶段 1：轻量检查（只看路径与元数据，不做递归遍历）──
+  // 以下任一条件成立即说明「迁移不可能进行」，无需再付出重量级统计的代价。
   const srcCrit = isCriticalPath(source);
   if (srcCrit.critical) issues.push({ code: 'CRITICAL_PATH', message: srcCrit.reason, path: source });
   const destCrit = isCriticalPath(destination);
@@ -375,20 +397,40 @@ function precheck(src, dest, opts = {}) {
     }
   }
 
-  const stats = fs.existsSync(source) ? walkStats(source) : { files: 0, bytes: 0, dirs: 0 };
+  // ── 阶段 2：仅在阶段 1 无任何阻断问题时，才做重量级统计 ──
+  // 缺陷 D1 修复（2026-09-23）：
+  //   原实现**无条件**执行 `walkStats(source)`。于是即便已判定 CRITICAL_PATH
+  //   （例如用户把 C:\Windows 填进源目录），仍会对整棵目录树做同步递归遍历，
+  //   数十秒至数分钟内阻塞事件循环，使服务对任何请求（含 /api/health）都不响应。
+  //   现在：已判死的输入直接返回；确实需要统计时也受 walkStats 的上限保护。
+  let stats = { files: 0, bytes: 0, dirs: 0, truncated: false };
+  let free = 0;
   const destDrive = driveLetterOf(destination);
-  const free = driveFreeBytes(destDrive);
-  if (stats.bytes > 0 && free > 0 && free < stats.bytes + 10 * 1024 * 1024) {
-    issues.push({
-      code: 'DISK_FULL',
-      message: '目标盘剩余空间不足（需要约 ' + Math.ceil(stats.bytes / 1048576) + ' MB，剩余 ' + Math.floor(free / 1048576) + ' MB）'
-    });
-  }
 
-  if (fs.existsSync(destination)) {
-    const destStats = walkStats(destination);
-    if (destStats.files > 0 || destStats.dirs > 0) {
-      issues.push({ code: 'DEST_EXISTS', message: '目标目录已存在且非空，拒绝覆盖', path: destination });
+  if (issues.length === 0) {
+    stats = walkStats(source);
+    if (stats.truncated) {
+      // 统计不完整 → 空间判断不可靠，直接要求用户改选更具体的目录
+      issues.push({
+        code: 'SOURCE_TOO_LARGE',
+        message: '源目录规模过大（已扫描 ' + stats.files + ' 个文件 / 约 '
+          + Math.ceil(stats.bytes / 1048576) + ' MB 后停止统计）。'
+          + '请改选具体的缓存子目录，不要选整盘或整个系统目录。'
+      });
+    } else {
+      free = driveFreeBytes(destDrive);
+      if (stats.bytes > 0 && free > 0 && free < stats.bytes + 10 * 1024 * 1024) {
+        issues.push({
+          code: 'DISK_FULL',
+          message: '目标盘剩余空间不足（需要约 ' + Math.ceil(stats.bytes / 1048576) + ' MB，剩余 ' + Math.floor(free / 1048576) + ' MB）'
+        });
+      }
+      if (fs.existsSync(destination)) {
+        const destStats = walkStats(destination);
+        if (destStats.files > 0 || destStats.dirs > 0) {
+          issues.push({ code: 'DEST_EXISTS', message: '目标目录已存在且非空，拒绝覆盖', path: destination });
+        }
+      }
     }
   }
 
