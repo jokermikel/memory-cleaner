@@ -12,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFileSync } = require('child_process');
+const { execFileSync, execFile } = require('child_process');
 
 const WS = path.join(__dirname, '..', '..');
 const LOG_DIR = path.join(WS, 'logs');
@@ -323,20 +323,37 @@ function removeLink(linkPath) {
   }
 }
 
-function copyDir(src, dest) {
+/**
+ * 异步复制目录（缺陷 D5 修复，2026-09-24）。
+ *
+ * 原实现优先走同步 `fs.cpSync`：遍历与复制期间**完全阻塞 Node 事件循环**，
+ * 服务对任何请求都不响应 —— 真机实测表现为浏览器端「迁移失败: Failed to fetch」，
+ * 且该分支**没有任何超时保护**（下方 robocopy 的 timeout 形同虚设）。
+ * 与已修复的 D1（预检同步递归遍历卡死服务）属同一类问题。
+ *
+ * 现改为异步：
+ *   ① 首选 fs.promises.cp —— 复制期间事件循环仍可调度，服务保持可响应；
+ *   ② 回退用异步 execFile 调 robocopy，并显式 /R:0 /W:0，
+ *      避免在被占用文件上长时间重试等待（原为 /R:1 /W:1）。
+ */
+async function copyDir(src, dest) {
   ensureDir(path.dirname(dest));
-  if (typeof fs.cpSync === 'function') {
-    fs.cpSync(src, dest, { recursive: true, errorOnExist: false, force: true });
-    return { ok: true, method: 'cpSync' };
+  if (fs.promises && typeof fs.promises.cp === 'function') {
+    await fs.promises.cp(src, dest, { recursive: true, errorOnExist: false, force: true });
+    return { ok: true, method: 'promises.cp' };
   }
-  try {
-    execFileSync('robocopy.exe', [src, dest, '/E', '/COPY:DAT', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'], {
-      windowsHide: true, timeout: 300000
-    });
-  } catch (e) {
-    const code = e.status;
-    if (!(code >= 0 && code < 8)) throw e;
-  }
+  await new Promise((resolve, reject) => {
+    execFile('robocopy.exe',
+      [src, dest, '/E', '/COPY:DAT', '/R:0', '/W:0', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'],
+      { windowsHide: true, timeout: 600000 },
+      (err) => {
+        if (!err) return resolve();
+        // robocopy 退出码 0~7 属成功/可接受（>=8 才是真失败）
+        const code = err.code;
+        if (typeof code === 'number' && code >= 0 && code < 8) return resolve();
+        reject(err);
+      });
+  });
   return { ok: true, method: 'robocopy' };
 }
 
@@ -450,7 +467,7 @@ function precheck(src, dest, opts = {}) {
   };
 }
 
-function rollback(state) {
+async function rollback(state) {
   const notes = [];
   if (state.linkCreated && state.source) {
     try {
@@ -470,16 +487,17 @@ function rollback(state) {
   }
   if (state.destCopied && state.destination && fs.existsSync(state.destination) && !state.keepDestOnRollback) {
     try {
-      fs.rmSync(state.destination, { recursive: true, force: true });
+      // 异步删除：删除大目录时同步 rmSync 同样会阻塞事件循环（与 D5 同类问题）
+      await fs.promises.rm(state.destination, { recursive: true, force: true });
       notes.push('removed_dest_copy');
     } catch (e) {
-      notes.push('remove_dest_failed');
+      notes.push('remove_dest_failed:' + e.message);
     }
   }
   return notes;
 }
 
-function execute(opts = {}) {
+async function execute(opts = {}) {
   const dryRun = opts.dryRun !== false;
   const check = precheck(opts.source, opts.destination, opts);
   if (!check.ok) {
@@ -527,9 +545,18 @@ function execute(opts = {}) {
     linkCreated: false
   };
 
+  // 缺陷 D4 补充加固：复制**开始前**先落一条 START 审计。
+  // 原实现只在成功(EXECUTED) 或异常进 catch(ROLLBACK) 时写日志；若进程在复制期间被结束，
+  // 日志中将完全无痕（真机实测正是如此）。留一条 START 即可判定「开始了但没结束」。
+  audit(`MIGRATE-START ${check.source} -> ${check.destination} ` +
+    `(${check.stats.files} files, ${(check.stats.bytes / 1048576).toFixed(1)}MB)`);
+
   try {
-    copyDir(check.source, check.destination);
+    // 缺陷 D3 修复：**开始复制之前**就置位 destCopied。
+    // 原实现只在复制「完全成功」后才置位，于是「复制中途失败」时目标盘已残留部分文件，
+    // 回滚却因 destCopied=false 而跳过清理（真机实测残留 36 文件 / 21.21MB）。
     rb.destCopied = true;
+    await copyDir(check.source, check.destination);
     const afterCopy = walkStats(check.destination);
     if (afterCopy.files !== check.stats.files || afterCopy.bytes !== check.stats.bytes) {
       throw fail('COPY_MISMATCH',
@@ -592,7 +619,7 @@ function execute(opts = {}) {
       message: '迁移成功。程序仍写原路径，数据已落在目标盘。备份将保留 ' + check.keepBackupDays + ' 天。'
     };
   } catch (e) {
-    const notes = rollback(rb);
+    const notes = await rollback(rb);
     audit(`ROLLBACK ${check.source}: ${e.code || ''} ${e.message}; ${notes.join(',')}`);
     if (e.code) throw e;
     throw fail('MIGRATE_FAILED', '迁移失败并已回滚：' + e.message, { rollback: notes });

@@ -351,7 +351,8 @@ async function handleMigrateExecute(req, res) {
     return sendError(res, 400, 'BAD_BODY', '请求体解析失败', e.message);
   }
   try {
-    const result = cacheMigrate.execute({
+    // 注意：execute 已改为异步（缺陷 D5 修复 —— 同步复制会阻塞事件循环）
+    const result = await cacheMigrate.execute({
       source: body.source,
       destination: body.destination,
       linkType: body.linkType,
@@ -419,7 +420,14 @@ function handleMemoryRoutes(req, res, pathname, query) {
         sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
         return true;
       }
-      handleMigrateExecute(req, res);
+      // execute 为异步：补 catch 兜底，避免未处理的 Promise 拒绝
+      handleMigrateExecute(req, res).catch((e) => {
+        try {
+          if (!res.headersSent) {
+            sendError(res, 500, 'MIGRATE_FAILED', '缓存迁移失败', e && e.message);
+          }
+        } catch (err) { /* 响应已断开，忽略 */ }
+      });
       return true;
     case '/api/cleanup/execute':
       if (req.method !== 'POST') {
