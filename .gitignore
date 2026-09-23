@@ -36,6 +36,17 @@ data/cache-migrations.json
 # 测试结论见仓库根目录的「最终测试报告.md」；测试代码含本机路径/进程名等环境细节
 server/services/__tests__/
 
+# ── 端到端运行器 / 定向验证脚手架 / 源码哈希基线（同上，仅本地）──
+# _*.js         定向 HTTP 验证与工具脚手架（_verify_http_gate.js / _baseline-rules.js 等）
+# _*.txt        上述脚手架写出的结果快照（_verify_diskmap.txt / _verify_baseline_cov.txt）
+# tests/        e2e 运行器（run-tests.js）、夹具（fixture.js）与 regenerate-baseline.js
+# baseline.json 由 tests\regenerate-baseline.js 本地生成，含本机源码哈希
+_*.js
+_*.txt
+_http_gate_results.json
+tests/
+baseline.json
+
 # ── 工作空间本地目录（不随仓库分发）──
 # .workbuddy/  编辑器/助手的工作空间数据
 # docs/        26 份过程文档与报告的本地归档（改动报告 / 测试验收 / 实施计划 / 过程记录）
