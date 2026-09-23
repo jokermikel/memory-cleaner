@@ -634,6 +634,124 @@ function listMigrations() {
   return loadState();
 }
 
+/**
+ * 撤销一次已完成的缓存迁移（**正规回滚通道**，含记录标记）。
+ *
+ * 与内部 `rollback(state)` 的区别：
+ *   - `rollback(state)` 是「迁移**执行失败**时的自动回滚」，只操作内存态；
+ *   - 本函数是「用户**主动撤销**一次已成功的迁移」，需要更新**持久化记录**。
+ *
+ * 策略：默认把**目标盘的最新数据**搬回原位，而不是用备份还原 ——
+ *   备份是「迁移前」的快照，目标盘那份才是最新的（迁移后程序仍持续写入）。
+ *   旧备份按原策略保留（`keepBackupDays`），作为额外保险。
+ *
+ * 安全约束（每条都不可省）：
+ *   ① 原路径必须是 junction/symlink —— 否则拒绝，避免误删普通目录；
+ *   ② 删除链接**只用 `fs.rmdir`，绝不递归删除** ——
+ *      递归删除（rmdir /S、rm -r、rmtree）在目录链接上有**删掉链接目标**的风险；
+ *   ③ 搬回后逐项校验文件数与字节数，**校验不过则不做任何删除**；
+ *
+ * @param {string} src 原路径（即当初迁移的 source）
+ * @param {{keepDestCopy?: boolean}} [opts]
+ * @returns {Promise<object>}
+ */
+async function rollbackMigration(src, opts = {}) {
+  const source = path.resolve(expand(src));
+  const state = loadState();
+  state.records = Array.isArray(state.records) ? state.records : [];
+
+  // 取该路径最后一次「未回滚」的记录
+  let idx = -1;
+  for (let i = state.records.length - 1; i >= 0; i--) {
+    const r = state.records[i];
+    if (normalize(r.source || '') === normalize(source) && !r.rolledBack) { idx = i; break; }
+  }
+  if (idx < 0) {
+    throw fail('NOT_MIGRATED', '未找到该路径的「未回滚」迁移记录，无需撤销');
+  }
+  const rec = state.records[idx];
+  const dest = rec.destination;
+
+  // ① 原路径必须是链接
+  const info = inspectPath(source);
+  if (!info.exists) throw fail('SOURCE_MISSING', '原路径不存在：' + source);
+  if (!info.isLink) {
+    throw fail('NOT_A_LINK',
+      '原路径不是目录链接（已非迁移状态），拒绝操作以免误删数据');
+  }
+
+  // ② 目标盘数据必须在
+  if (!dest || !fs.existsSync(dest)) {
+    throw fail('DEST_MISSING',
+      '目标盘数据不存在：' + (dest || '(记录缺失)') + ' —— 请改用备份目录手动还原');
+  }
+  const before = walkStats(dest);
+
+  // ③ 删链接：只用 rmdir，绝不递归
+  try {
+    fs.rmdirSync(source);
+  } catch (e) {
+    throw fail('UNLINK_FAILED', '删除目录链接失败（可能仍被程序占用，请先关闭相关程序）：' + e.message);
+  }
+  if (fs.existsSync(source)) {
+    throw fail('UNLINK_FAILED', '删除链接后原路径仍存在，状态异常，已停止');
+  }
+
+  // ④ 把目标盘数据搬回原位（异步，避免阻塞事件循环）
+  let restored = { files: 0, bytes: 0 };
+  try {
+    await fs.promises.cp(dest, source, { recursive: true, errorOnExist: false, force: true });
+    restored = walkStats(source);
+  } catch (e) {
+    throw fail('RESTORE_FAILED',
+      '搬回数据失败：' + e.message +
+      '。当前状态：原路径为空、目标盘数据完好，可用备份目录手动还原');
+  }
+
+  // ⑤ 校验：不一致则不做任何删除
+  if (restored.files !== before.files || restored.bytes !== before.bytes) {
+    throw fail('RESTORE_MISMATCH',
+      '搬回后校验不一致（目标 ' + before.files + ' 文件/' + before.bytes +
+      ' 字节，原位 ' + restored.files + ' 文件/' + restored.bytes +
+      ' 字节）。已保留原路径与目标盘两处数据，未做任何删除，请人工复核');
+  }
+
+  // ⑥ 打上回滚标记（本次新增字段）
+  rec.rolledBack = true;
+  rec.rolledBackAt = new Date().toISOString();
+  rec.rollbackFiles = restored.files;
+  rec.rollbackBytes = restored.bytes;
+  saveState(state);
+
+  // ⑦ 按需清理目标盘副本
+  let destRemoved = false;
+  if (!opts.keepDestCopy) {
+    try {
+      await fs.promises.rm(dest, { recursive: true, force: true });
+      destRemoved = true;
+    } catch (e) {
+      destRemoved = false;   // 留给人工处理，不影响回滚结果
+    }
+  }
+
+  audit(`ROLLED-BACK ${source} <- ${dest}; ${restored.files} files; destRemoved=${destRemoved}`);
+
+  return {
+    ok: true,
+    action: 'cache-migrate-rollback',
+    source,
+    destination: dest,
+    restoredFiles: restored.files,
+    restoredBytes: restored.bytes,
+    backupKept: rec.backupPath || null,
+    destRemoved,
+    rolledBackAt: rec.rolledBackAt,
+    message: '已撤销迁移：数据搬回原位（' + restored.files + ' 个文件）' +
+      (destRemoved ? '，目标盘副本已清理' : '，目标盘副本保留') +
+      '；备份目录仍按原策略保留'
+  };
+}
+
 function purgeExpiredBackups(nowMs) {
   const now = nowMs || Date.now();
   const state = loadState();
@@ -667,6 +785,7 @@ module.exports = {
   inspectPath,
   loadPresets,
   listMigrations,
+  rollbackMigration,
   purgeExpiredBackups,
   isCriticalPath,
   walkStats,

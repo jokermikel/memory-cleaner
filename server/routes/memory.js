@@ -325,6 +325,32 @@ const MIGRATE_CLIENT_CODES = new Set([
   'SOURCE_IN_USE', 'LINK_FAILED', 'LINK_NOT_DETECTED', 'PROBE_FAILED'
 ]);
 
+/** 撤销迁移（回滚）专属的客户端错误码 —— 与迁移执行区分开，便于前端分别提示 */
+const ROLLBACK_CLIENT_CODES = new Set([
+  'NOT_MIGRATED', 'SOURCE_MISSING', 'NOT_A_LINK', 'DEST_MISSING',
+  'UNLINK_FAILED', 'RESTORE_FAILED', 'RESTORE_MISMATCH'
+]);
+
+async function handleMigrateRollback(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return sendError(res, 400, 'BAD_BODY', '请求体解析失败', e.message);
+  }
+  try {
+    const result = await cacheMigrate.rollbackMigration(body.source, {
+      keepDestCopy: body.keepDestCopy === true
+    });
+    sendJson(res, 200, result);
+  } catch (e) {
+    if (e.code && ROLLBACK_CLIENT_CODES.has(e.code)) {
+      return sendError(res, 400, e.code, e.message);
+    }
+    sendError(res, 500, 'ROLLBACK_FAILED', '撤销迁移失败', e.message);
+  }
+}
+
 async function handleMigratePrecheck(req, res) {
   let body;
   try {
@@ -404,6 +430,19 @@ function handleMemoryRoutes(req, res, pathname, query) {
       return true;
     case '/api/disk/migrate/inspect':
       handleMigrateInspect(query, res);
+      return true;
+    case '/api/disk/migrate/rollback':
+      if (req.method !== 'POST') {
+        sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
+        return true;
+      }
+      handleMigrateRollback(req, res).catch((e) => {
+        try {
+          if (!res.headersSent) {
+            sendError(res, 500, 'ROLLBACK_FAILED', '撤销迁移失败', e && e.message);
+          }
+        } catch (err) { /* 响应已断开，忽略 */ }
+      });
       return true;
     case '/api/disk/migrate/records':
       handleMigrateRecords(query, res);

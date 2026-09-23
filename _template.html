@@ -381,6 +381,7 @@
           <button class="btn btn-ghost" id="btnMigPresets">加载常见缓存</button>
           <button class="btn btn-ghost" id="btnMigPrecheck">预检</button>
           <button class="btn btn-primary" id="btnMigExec" disabled>确认搬走并建链接</button>
+          <button class="btn btn-ghost" id="btnMigRollback" title="把数据从目标盘搬回原位，并移除原位置的目录链接">撤销迁移（搬回原位）</button>
         </div>
       </div>
       <div class="cleanup-body">
@@ -1395,6 +1396,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       const btnCheck = document.getElementById('btnMigPrecheck');
       const btnExec = document.getElementById('btnMigExec');
       const btnInspect = document.getElementById('btnMigInspect');
+      const btnRollback = document.getElementById('btnMigRollback');
       const inspectPath = document.getElementById('migInspectPath');
       if(!sel || !btnLoad) return;
       let lastCheck = null;
@@ -1404,6 +1406,51 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
         resultBox.className = 'cleanup-result ' + (ok ? 'result-ok' : 'result-warn');
         resultBox.innerHTML = html;
       }
+
+      // ── 撤销迁移（把数据从目标盘搬回原位）──
+      // 后端 rollbackMigration() 会：删目录链接（只用 rmdir，绝不递归）→
+      // 把目标盘的**最新**数据搬回原位 → 逐项校验一致后才清理目标盘副本，
+      // 并在迁移记录上打 rolledBack / rolledBackAt 标记。
+      if(btnRollback) btnRollback.addEventListener('click', async () => {
+        const source = src.value.trim();
+        if(!source){ showResult(false, '请先填写要撤销的源路径。'); return; }
+        if(!confirm('确认撤销这次迁移？\n\n' +
+          '· 会把数据从目标盘**搬回原位**（搬回的是目标盘的最新数据）\n' +
+          '· 原位置的目录链接会被移除\n' +
+          '· 目标盘副本会被清理（可从回收站还原）\n' +
+          '· 备份目录仍按原策略保留\n\n' +
+          '撤销前请先关闭正在使用该目录的程序。')) return;
+        btnRollback.disabled = true;
+        const old = btnRollback.textContent;
+        btnRollback.textContent = '正在撤销…';
+        try{
+          const r = await (await apiFetch('/api/disk/migrate/rollback', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source: source })
+          })).json();
+          if(r.error){
+            showResult(false, '撤销失败：' + (r.error.message || r.error.code));
+            return;
+          }
+          showResult(true,
+            '<strong>已撤销迁移</strong><br>' +
+            '源路径：' + r.source + '<br>' +
+            '原目标盘：' + r.destination + '<br>' +
+            '已搬回 <strong>' + r.restoredFiles + '</strong> 个文件（' +
+            (r.restoredBytes / 1048576).toFixed(2) + ' MB）<br>' +
+            (r.destRemoved ? '目标盘副本已清理（回收站可还原）<br>' : '目标盘副本已保留<br>') +
+            (r.backupKept ? '备份仍保留：' + r.backupKept + '<br>' : '') +
+            '记录已标记 <code>rolledBack</code>：' + (r.rolledBackAt || ''));
+          lastCheck = null;
+          btnExec.disabled = true;
+        } catch(e){
+          showResult(false, '撤销请求失败：' + e.message);
+        } finally {
+          btnRollback.disabled = false;
+          btnRollback.textContent = old;
+        }
+      });
 
       btnLoad.addEventListener('click', async () => {
         btnLoad.disabled = true; btnLoad.textContent = '加载中…';
