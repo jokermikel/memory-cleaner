@@ -311,6 +311,235 @@ function loadPresets() {
   return items;
 }
 
+/**
+ * 预置目录可迁移性评估（筛选逻辑，2026-09-24；同日重写为异步并发）。
+ *
+ * 目标：界面「预置目录」下拉里，**可选项必须满足全部硬性条件且实际具备可迁移性**；
+ *      不满足任一条件的条目仍然列出但**禁用并给出原因**（让用户看得到「为什么不能选」）。
+ *
+ * 硬条件（全部满足才 migratable=true，按序短路）：
+ *   H1 SOURCE_NOT_EXIST    路径（环境变量展开后）当前必须存在 —— 不存在即无物可迁
+ *   H2 CRITICAL_PATH       非系统关键路径（isCriticalPath：盘符根 / Windows / System32 /
+ *                          Program Files / Users / 用户配置根等）
+ *   H3 SYSTEM_MANAGED      纯用户态：不在系统树（%SystemRoot%、Program Files(x86)?）
+ *                          也不叫系统保留目录名（$Recycle.Bin / System Volume Information）
+ *                          —— 这些位置有服务持续写入或受系统管控，
+ *                          占用**无法通过「退出程序」释放**（真机实测 C:\Windows\Logs
+ *                          被 WaaSMedic 持续写入即此类）
+ *   H4 SOURCE_IS_LINK       非目录链接 —— 已是 junction/symlink（lstat 识别，微秒级）
+ *                          说明已迁移过；**绝不用 inspectPath（PowerShell）**，
+ *                          首版实测 20 条同步调 PowerShell 耗时 18.3s 且击穿预算
+ *   H5 实际可迁移性          只读抽样试开（异步并发 probeSourceLockedAsync）：
+ *                          EBUSY=驱动/程序独占持有、EPERM=ACL 保护、目录不可读 ——
+ *                          任一命中即不可迁移（真机 NVIDIA\DXCache 驱动锁、
+ *                          INetCache ACL 属此类，静态规则查不出来，必须真试读）
+ *   H6 NOT_ASSESSED         评估预算（race 保险丝）耗尽、未能完成检测的条目 →
+ *                          **未能确认满足全部条件，一律禁用**（宁可少选，不可错选）
+ *
+ * 不在硬条件内、由预检兜底的：目录**规模**上限（SOURCE_TOO_LARGE）——
+ *   规模判定需要全量遍历，代价过高，留给「预检」阶段短路。
+ *
+ * 性能：H1~H4 同步廉价（文件系统元数据）；H5 对全部待检条目**并发**异步执行
+ *   （每条仍受 PROBE_* 上限约束），事件循环在等待 IO 时保持调度，服务不假死；
+ *   总预算 ASSESS_BUDGET_MS 用 Promise.race 兜底。
+ *
+ * @param {{items?: Array, budgetMs?: number, probe?: Object}} [opts]
+ *        items  注入待评估条目（单测用）；probe 透传给 probeSourceLockedAsync（注入 openFile 模拟锁）
+ * @returns {Promise<{items: Array, migratableCount: number, blockedCount: number,
+ *            budgetMs: number, assessedAt: string, elapsedMs: number}>}
+ */
+const ASSESS_BUDGET_MS = 2500;
+const SYSTEM_RESERVED_NAMES = ['$recycle.bin', 'system volume information'];
+
+function systemTreesLower() {
+  const list = [
+    process.env.SystemRoot || (systemDrive() + '\\Windows'),
+    process.env['ProgramFiles'] || (systemDrive() + '\\Program Files'),
+    process.env['ProgramFiles(x86)'] || (systemDrive() + '\\Program Files (x86)')
+  ];
+  return list
+    .filter(Boolean)
+    .map(p => path.resolve(p).toLowerCase() + path.sep);
+}
+
+async function probeSourceLockedAsync(root, opts = {}) {
+  const openFile = typeof opts.openFile === 'function' ? opts.openFile : defaultOpenFileAsync;
+  const walkDeadline = Date.now() + (opts.walkMs != null ? opts.walkMs : PROBE_WALK_MS);
+  const walkCap = opts.walkFiles != null ? opts.walkFiles : PROBE_WALK_FILES;
+
+  const result = {
+    dirReadable: true,
+    sampled: 0,
+    ok: 0,
+    locked: [],
+    candidates: 0,
+    truncated: false,
+    at: new Date().toISOString(),
+    note: '基于当前时刻的抽样，占用状态可能随后续程序运行变化'
+  };
+
+  try {
+    await fs.promises.readdir(root);
+  } catch (e) {
+    result.dirReadable = false;
+    return result;
+  }
+
+  const candidates = [];
+  async function walk(p) {
+    if (candidates.length >= walkCap || Date.now() > walkDeadline) {
+      result.truncated = true;
+      return;
+    }
+    let entries;
+    try { entries = await fs.promises.readdir(p, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of entries) {
+      if (candidates.length >= walkCap || Date.now() > walkDeadline) {
+        result.truncated = true;
+        return;
+      }
+      if (e.name === '.' || e.name === '..') continue;
+      const full = path.join(p, e.name);
+      let st;
+      try { st = await fs.promises.lstat(full); } catch (err) { continue; }
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) await walk(full);
+      else if (st.isFile()) candidates.push({ path: full, size: st.size });
+    }
+  }
+  await walk(root);
+  result.candidates = candidates.length;
+
+  const half = Math.ceil(PROBE_OPEN_MAX / 2);
+  const bySize = candidates.slice().sort((a, b) => b.size - a.size).slice(0, half);
+  const byOrder = candidates.slice(0, half);
+  const picked = [];
+  const seen = new Set();
+  for (const c of bySize.concat(byOrder)) {
+    if (seen.has(c.path)) continue;
+    seen.add(c.path);
+    picked.push(c);
+    if (picked.length >= PROBE_OPEN_MAX) break;
+  }
+
+  const openDeadline = Date.now() + (opts.openMs != null ? opts.openMs : PROBE_OPEN_MS);
+  for (const c of picked) {
+    if (Date.now() > openDeadline) break;
+    result.sampled += 1;
+    try {
+      // 兼容同步注入的 openFile（单测模拟文件锁）；真实实现内部是异步 open
+      await Promise.resolve().then(() => openFile(c.path));
+      result.ok += 1;
+    } catch (e) {
+      result.locked.push({ path: c.path, size: c.size, error: e.code || e.message || 'OPEN_FAILED' });
+    }
+  }
+  return result;
+}
+
+async function defaultOpenFileAsync(p) {
+  const fh = await fs.promises.open(p, 'r');
+  await fh.close();
+}
+
+async function assessPresets(opts = {}) {
+  const started = Date.now();
+  const items = Array.isArray(opts.items) ? opts.items : loadPresets();
+  const budgetMs = Number.isFinite(opts.budgetMs) ? opts.budgetMs : ASSESS_BUDGET_MS;
+  const trees = systemTreesLower();
+
+  // ── 阶段 1：H1~H4 同步廉价静态检查（文件系统元数据，无子进程）──
+  const out = new Map();       // id(index) -> 结果
+  const pending = [];          // 需要 H5 抽样的条目
+  const add = (idx, it, target, blockers, extra) => out.set(idx, {
+    ...it,
+    path: target,
+    paths: [target].concat((it.paths || []).slice(1)),
+    migratable: blockers.length === 0,
+    blockers,
+    assessedAt: new Date().toISOString(),
+    ...(extra || {})
+  });
+
+  items.forEach((it, idx) => {
+    const raw = (it.paths && it.paths[0]) || '';
+    const target = raw ? path.resolve(expand(raw)) : '';
+    const low = target.toLowerCase();
+
+    if (!target || !fs.existsSync(target)) {
+      return add(idx, it, target || raw, [{ code: 'SOURCE_NOT_EXIST', message: '目录不存在（环境或软件未安装？）' }]);
+    }
+    const crit = isCriticalPath(target);
+    if (crit.critical) {
+      return add(idx, it, target, [{ code: 'CRITICAL_PATH', message: '系统关键路径，禁止迁移' }]);
+    }
+    if (trees.some(t => low.startsWith(t)) ||
+        SYSTEM_RESERVED_NAMES.includes(path.basename(low))) {
+      return add(idx, it, target, [{
+        code: 'SYSTEM_MANAGED',
+        message: '系统目录/系统管理位置，占用无法通过退出程序释放'
+      }]);
+    }
+    let isLink = false;
+    try { isLink = fs.lstatSync(target).isSymbolicLink(); } catch (e) { isLink = false; }
+    if (isLink) {
+      return add(idx, it, target, [{ code: 'SOURCE_IS_LINK', message: '已是迁移链接（迁移过或系统链接）' }]);
+    }
+    pending.push({ idx, it, target });
+  });
+
+  // ── 阶段 2：H5 并发异步抽样（race 预算保险丝）──
+  const jobs = pending.map(job => {
+    const j = { ...job, done: false, probe: null, failed: false };
+    j.p = probeSourceLockedAsync(job.target, opts.probe || {})
+      .then(p => { j.probe = p; j.done = true; })
+      .catch(() => { j.failed = true; j.done = true; });
+    return j;
+  });
+  let timer = null;
+  await Promise.race([
+    Promise.all(jobs.map(j => j.p)),
+    new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, budgetMs)); })
+  ]);
+  if (timer) clearTimeout(timer);
+
+  for (const j of jobs) {
+    if (!j.done) {
+      add(j.idx, j.it, j.target, [{ code: 'NOT_ASSESSED', message: '未完成检测，重新加载可重试' }]);
+      continue;
+    }
+    if (j.failed) {
+      add(j.idx, j.it, j.target, [{ code: 'SOURCE_UNREADABLE', message: '检测失败：目录不可读' }]);
+      continue;
+    }
+    const probe = j.probe;
+    if (!probe.dirReadable) {
+      add(j.idx, j.it, j.target,
+        [{ code: 'SOURCE_UNREADABLE', message: '目录不可读（权限或被独占占用）' }], { probe: null });
+      continue;
+    }
+    if (probe.locked.length > 0) {
+      add(j.idx, j.it, j.target, [{
+        code: 'SOURCE_LOCKED',
+        message: '文件被占用（' + probe.locked.length + ' 个），请先退出使用它的程序'
+      }], { probe });
+      continue;
+    }
+    add(j.idx, j.it, j.target, [], { probe });
+  }
+
+  const list = items.map((_, idx) => out.get(idx));
+  const migratableCount = list.filter(i => i.migratable).length;
+  return {
+    items: list,
+    migratableCount,
+    blockedCount: list.length - migratableCount,
+    budgetMs,
+    assessedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - started
+  };
+}
+
 function inspectPath(targetPath) {
   const expanded = path.resolve(expand(targetPath));
   const result = {
@@ -928,6 +1157,7 @@ module.exports = {
   inspect,
   inspectPath,
   loadPresets,
+  assessPresets,
   listMigrations,
   rollbackMigration,
   purgeExpiredBackups,

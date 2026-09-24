@@ -1484,14 +1484,30 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       });
 
       btnLoad.addEventListener('click', async () => {
-        btnLoad.disabled = true; btnLoad.textContent = '加载中…';
+        btnLoad.disabled = true; btnLoad.textContent = '检测中…';
         try {
           const d = await (await apiFetch('/api/disk/migrate/presets')).json();
           const items = d.items || [];
-          sel.innerHTML = '<option value="">（手动填写源路径）</option>' + items.map(i =>
-            '<option value="'+String(i.paths && i.paths[0] || '').replace(/"/g,'&quot;')+'">'+i.name+' — '+(i.paths&&i.paths[0]||'')+'</option>'
-          ).join('');
-          hint.textContent = '已加载 '+items.length+' 条常见缓存目录。选一条后会填入源路径，请再填目标盘目录。';
+          if (d.error) throw new Error(apiErrorText(d));
+          // 筛选规则（服务端硬条件已判定，这里只做展示）：
+          //   migratable=true  → 可选（满足全部硬条件且抽样试读通过）
+          //   migratable=false → 禁用并展示原因，用户看得到「为什么不能选」
+          const ok = items.filter(i => i.migratable);
+          const bad = items.filter(i => !i.migratable);
+          const reasonOf = i => (i.blockers || []).map(b => b.message).join('；') || '不满足迁移硬条件';
+          const optOf = (i, disabled) => {
+            const p = String(i.path || (i.paths && i.paths[0]) || '');
+            const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+            const label = (disabled ? '⛔ ' : '') + esc(i.name) +
+              (disabled ? ' — ' + esc(reasonOf(i)) : ' — ' + esc(p));
+            return '<option value="' + esc(disabled ? '' : p) + '"' +
+              (disabled ? ' disabled' : '') + '>' + label + '</option>';
+          };
+          sel.innerHTML = '<option value="">（手动填写源路径）</option>' +
+            (ok.length ? '<optgroup label="✅ 可迁移">' + ok.map(i => optOf(i, false)).join('') + '</optgroup>' : '') +
+            (bad.length ? '<optgroup label="⛔ 不可迁移（禁用，原因见条目）">' + bad.map(i => optOf(i, true)).join('') + '</optgroup>' : '');
+          hint.textContent = ok.length + ' 条可迁移 / ' + bad.length + ' 条不可迁移（已禁用并标注原因）。' +
+            '选一条后会填入源路径，请再填目标盘目录；迁移前请先完全退出对应程序。';
         } catch(e) {
           hint.textContent = '加载失败：'+e.message+'。请确认已通过 启动.bat 打开服务。';
         } finally {

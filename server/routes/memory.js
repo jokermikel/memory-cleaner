@@ -290,9 +290,11 @@ async function handleTrimExecute(req, res) {
   }
 }
 
-function handleMigratePresets(query, res) {
+async function handleMigratePresets(query, res) {
   try {
-    sendJson(res, 200, { items: cacheMigrate.loadPresets() });
+    // 返回经可迁移性评估的清单：每项含 migratable / blockers，
+    // 前端据此把不满足硬条件的条目渲染为禁用（附原因），可选的才允许点击。
+    sendJson(res, 200, await cacheMigrate.assessPresets());
   } catch (e) {
     sendError(res, 500, 'MIGRATE_PRESETS_FAILED', '读取可迁移缓存清单失败', e.message);
   }
@@ -426,7 +428,14 @@ function handleMemoryRoutes(req, res, pathname, query) {
       handleTrimExecute(req, res);
       return true;
     case '/api/disk/migrate/presets':
-      handleMigratePresets(query, res);
+      // 评估为异步（H5 占用抽样并发执行）：补 catch 兜底，避免未处理的 Promise 拒绝
+      handleMigratePresets(query, res).catch((e) => {
+        try {
+          if (!res.headersSent) {
+            sendError(res, 500, 'MIGRATE_PRESETS_FAILED', '读取可迁移缓存清单失败', e && e.message);
+          }
+        } catch (err) { /* 响应已断开，忽略 */ }
+      });
       return true;
     case '/api/disk/migrate/inspect':
       handleMigrateInspect(query, res);
