@@ -21,6 +21,7 @@
 const http = require('http');
 const crypto = require('crypto');
 const { handleMemoryRoutes } = require('./routes/memory');
+const cacheMigrate = require('./services/cacheMigrateService');
 
 const PORT = Number(process.argv[2]) || 7788;
 
@@ -42,6 +43,9 @@ const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  * 除下面这些**毫秒级、无副作用**的只读接口外，所有 `/api/*` 都要求令牌
  * （包括未知路径与将来新增的接口，自动受保护，不会漏）。
  *
+ * `/api/disk/migrate/presets` 会对多个本地目录做异步元数据检查与文件抽样，
+ * 不属于廉价接口，必须带令牌；页面通过同源首页获取令牌后调用。
+ *
  * 为什么连读接口也要令牌：昂贵的只读接口会真的跑 PowerShell 采集或全盘 robocopy 扫描
  * （`/api/disk/snapshot` 与 `/api/disk/apps` 各需 30~60 秒）。恶意页面用
  * `<img src="http://127.0.0.1:7788/api/disk/snapshot">` 就能反复触发——
@@ -52,7 +56,6 @@ const CHEAP_READ_PATHS = new Set([
   '/api/health',                  // 端口探活（launcher 依赖）
   '/api/cleanup/io',              // 磁盘吞吐采样，毫秒级
   '/api/disk/volumes',            // 分区容量（Win32_LogicalDisk），毫秒级
-  '/api/disk/migrate/presets',    // 静态预设列表
   '/api/disk/migrate/inspect',    // 单个路径的链接类型检查
   '/api/disk/migrate/records',    // 迁移记录（读本地 JSON）
   '/api/privilege/status'         // 是否管理员
@@ -218,6 +221,7 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
+  try { cacheMigrate.purgeExpiredBackups(); } catch (e) { console.error('迁移备份清理失败：', e.message); }
   console.log(`内存数据服务已启动：http://127.0.0.1:${PORT}`);
   console.log('  访问控制：写接口需页面内下发的一次性令牌（防跨站触发清理）');
   console.log('  健康检查：  GET /api/health');

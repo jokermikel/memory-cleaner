@@ -381,7 +381,7 @@
           <button class="btn btn-ghost" id="btnMigPresets">加载常见缓存</button>
           <button class="btn btn-ghost" id="btnMigPrecheck">预检</button>
           <button class="btn btn-primary" id="btnMigExec" disabled>确认搬走并建链接</button>
-          <button class="btn btn-ghost" id="btnMigRollback" title="把数据从目标盘搬回原位，并移除原位置的目录链接">撤销迁移（搬回原位）</button>
+          <button class="btn btn-ghost" id="btnMigRollback" title="撤销下方已选择的迁移记录，并把数据搬回原位" disabled>撤销迁移（搬回原位）</button>
         </div>
       </div>
       <div class="cleanup-body">
@@ -390,6 +390,12 @@
             <span class="k">预置目录</span>
             <select id="migPreset" class="search" style="min-width:0">
               <option value="">（手动填写源路径）</option>
+            </select>
+          </label>
+          <label class="metric" style="display:flex;flex-direction:column;gap:6px">
+            <span class="k">待撤销迁移记录</span>
+            <select id="migRollbackRecord" class="search" style="min-width:0">
+              <option value="">（先加载迁移记录）</option>
             </select>
           </label>
           <label class="metric" style="display:flex;flex-direction:column;gap:6px">
@@ -483,6 +489,18 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
   }
 
   /**
+   * 全页唯一的 HTML 转义函数（M-04）。
+   * 所有把本地数据/接口错误拼进 innerHTML 的地方都必须经过它。
+   * 五个字符都要转：& < > " ' —— 少转单引号时，属性上下文（'...'）会被闭合逃逸。
+   */
+  function escapeHtml(value){
+    return String(value == null ? '' : value)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
+  }
+
+  /**
    * 把服务端的错误对象翻成用户能看懂的一句话。
    * 重点处理鉴权类错误：本地文件模式下用户会看到「请通过服务打开」而不是一串英文码。
    */
@@ -498,8 +516,25 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
     if(e.code === 'BAD_ORIGIN' || e.code === 'BAD_HOST'){
       return '无法执行：页面来源不被信任。\n\n' + (e.message || '');
     }
+    if(e.code === 'STATE_CORRUPTED'){
+      return '迁移记录文件已损坏，为避免覆盖现场已停止读取。\n\n'
+        + (e.message || '') + '\n\n'
+        + '处理建议：先备份 data/cache-migrations.json，再人工核对其中内容；'
+        + '确认无需保留后把它恢复为 {"records": []} 即可继续使用。';
+    }
+    if(e.code === 'ASSESS_BUSY'){
+      return '上一次「加载常见缓存」评估还没结束，请等 2~3 秒后再点一次。';
+    }
     return e.message || fallback || '请求失败';
   }
+
+  /**
+   * 错误文本进入 innerHTML 的**唯一出口**（M-04）。
+   * 直接写 `innerHTML = '...' + apiErrorText(r)` / `'...' + e.message` 都属于漏转义：
+   * 服务端返回的 message、异常文本同样可能带本地数据（例如损坏文件里的内容）。
+   */
+  function apiErrorHtml(r, fallback){ return escapeHtml(apiErrorText(r, fallback)); }
+  function errHtml(e){ return escapeHtml(e && e.message != null ? e.message : e); }
 
   // ───── 批量上限闸门 ─────
   // BATCH_LIMIT 必须与 server/services/cleanupService.js 里的同名常量保持一致。
@@ -585,12 +620,12 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
 
     document.getElementById('modules').innerHTML = (s.modules||[]).map(m =>
       '<div class="module-card"><div class="module-icon">💾</div>' +
-      '<div class="module-info"><div class="m-name">' + fmt(m.capacityBytes) + ' ' + (m.manufacturer||'') + '</div>' +
-      '<div class="m-detail">' + (m.slot || m.bank || '插槽') +
-      (m.memoryType ? ' · ' + m.memoryType : '') +
-      (m.speedMhz ? ' · ' + m.speedMhz + ' MHz' : '') +
-      ((m.configuredSpeedMhz && m.configuredSpeedMhz !== m.speedMhz) ? '（实跑 ' + m.configuredSpeedMhz + ' MHz）' : '') +
-      (m.partNumber ? ' · ' + m.partNumber : '') + '</div></div></div>'
+      '<div class="module-info"><div class="m-name">' + fmt(m.capacityBytes) + ' ' + escapeHtml(m.manufacturer || '') + '</div>' +
+      '<div class="m-detail">' + escapeHtml(m.slot || m.bank || '插槽') +
+      (m.memoryType ? ' · ' + escapeHtml(m.memoryType) : '') +
+      (m.speedMhz ? ' · ' + escapeHtml(m.speedMhz) + ' MHz' : '') +
+      ((m.configuredSpeedMhz && m.configuredSpeedMhz !== m.speedMhz) ? '（实跑 ' + escapeHtml(m.configuredSpeedMhz) + ' MHz）' : '') +
+      (m.partNumber ? ' · ' + escapeHtml(m.partNumber) : '') + '</div></div></div>'
     ).join('') || '<div class="metric"><div class="k">这台电脑没有读到内存条信息（WMI 可能被权限或虚拟机限制）</div></div>';
 
     const safeTotal = apps.filter(a => a.risk==='safe').reduce((sum,a)=>sum+a.workingSetBytes,0);
@@ -834,22 +869,22 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       const expandable = a.groupBehavior === 'expand' && a.processes && a.processes.length > 0;
       const children = expandable
         ? '<div class="app-children" data-children="1">' + a.processes.map(p =>
-            '<div class="child-row"><span class="child-name">'+p.name+' (PID '+p.pid+')'+(p.path?' · '+p.path:'')+'</span>' +
+            '<div class="child-row"><span class="child-name">'+escapeHtml(p.name)+' (PID '+escapeHtml(p.pid)+')'+(p.path?' · '+escapeHtml(p.path):'')+'</span>' +
             '<span class="child-mem">'+fmt(p.workingSet)+'</span></div>').join('') + '</div>'
         : '';
       const checkable = isRamCheckable(a);
       const checked = ramPicked.has(a.key);
-      return '<div class="app-row'+(expandable?' expandable':'')+(checked?' is-picked':'')+'" data-key="'+a.key+'">' +
+      return '<div class="app-row'+(expandable?' expandable':'')+(checked?' is-picked':'')+'" data-key="'+escapeHtml(a.key)+'">' +
         '<label class="app-check">' +
-          '<input type="checkbox" data-key="'+a.key+'"'+(checkable?'':' disabled title="系统保护进程，禁止结束"')+(checked?' checked':'')+'>' +
+          '<input type="checkbox" data-key="'+escapeHtml(a.key)+'"'+(checkable?'':' disabled title="系统保护进程，禁止结束"')+(checked?' checked':'')+'>' +
         '</label>' +
         '<div class="app-main">' +
-          '<div class="app-title"><span class="app-name">'+a.name+'</span>' +
+          '<div class="app-title"><span class="app-name">'+escapeHtml(a.name)+'</span>' +
           '<span class="risk-tag '+riskCls[a.risk]+'">'+riskLabel[a.risk]+'</span>' +
-          (expandable ? '<span class="expand-hint">▸ 展开 '+a.processCount+' 个服务</span>' : '') + '</div>' +
-          '<div class="app-purpose">'+a.purpose+'</div>' +
-          '<div class="app-meta">'+a.category+' · '+a.vendor+' · '+a.processCount+' 个进程' +
-          (a.riskReason && a.risk!=='caution' ? ' · '+a.riskReason : '') + '</div>' +
+          (expandable ? '<span class="expand-hint">▸ 展开 '+escapeHtml(a.processCount)+' 个服务</span>' : '') + '</div>' +
+          '<div class="app-purpose">'+escapeHtml(a.purpose)+'</div>' +
+          '<div class="app-meta">'+escapeHtml(a.category)+' · '+escapeHtml(a.vendor)+' · '+escapeHtml(a.processCount)+' 个进程' +
+          (a.riskReason && a.risk!=='caution' ? ' · '+escapeHtml(a.riskReason) : '') + '</div>' +
         '</div>' +
         '<div class="app-side">' +
           '<div class="mem-bar"><i class="'+barCls[a.risk]+'" style="width:'+(a.workingSetBytes/maxWs*100)+'%"></i></div>' +
@@ -924,19 +959,19 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       ramSelResult.style.display = '';
       if(r.error){
         ramSelResult.className = 'cleanup-result result-warn';
-        ramSelResult.innerHTML = '<strong>执行被拒绝：</strong>' + apiErrorText(r);
+        ramSelResult.innerHTML = '<strong>执行被拒绝：</strong>' + apiErrorHtml(r);
       } else {
         const ok = r.succeeded > 0;
         ramSelResult.className = 'cleanup-result ' + (ok ? 'result-ok' : 'result-warn');
         let html = ok
-          ? '<strong>已结束 ' + r.succeeded + ' / ' + r.requested + ' 个进程</strong>' +
-            '<div class="compare"><span>清理前 '+fmt(r.beforeUsedBytes)+'（'+r.beforePercent+'%）</span>' +
-            '<span class="arrow">→</span><span class="after">清理后 '+fmt(r.afterUsedBytes)+'（'+r.afterPercent+'%）</span></div>' +
+          ? '<strong>已结束 ' + escapeHtml(r.succeeded) + ' / ' + escapeHtml(r.requested) + ' 个进程</strong>' +
+            '<div class="compare"><span>清理前 '+fmt(r.beforeUsedBytes)+'（'+escapeHtml(r.beforePercent)+'%）</span>' +
+            '<span class="arrow">→</span><span class="after">清理后 '+fmt(r.afterUsedBytes)+'（'+escapeHtml(r.afterPercent)+'%）</span></div>' +
             '<div>实际释放 <strong>'+fmt(r.freedBytes)+'</strong></div>'
-          : '<strong>没有进程被成功关闭</strong><div style="margin-top:8px">'+(r.systemDeltaNote||'')+'</div>';
+          : '<strong>没有进程被成功关闭</strong><div style="margin-top:8px">'+escapeHtml(r.systemDeltaNote||'')+'</div>';
         if(r.failReasons && Object.keys(r.failReasons).length){
           html += '<div class="result-detail"><strong>失败原因：</strong><br>' +
-            Object.entries(r.failReasons).map(([k,v]) => '· '+k+'（'+v+' 个）').join('<br>') + '</div>';
+            Object.entries(r.failReasons).map(([k,v]) => '· '+escapeHtml(k)+'（'+escapeHtml(v)+' 个）').join('<br>') + '</div>';
         }
         ramSelResult.innerHTML = html;
         ramPicked.clear();
@@ -946,7 +981,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
     } catch(e) {
       ramSelResult.style.display = '';
       ramSelResult.className = 'cleanup-result result-warn';
-      ramSelResult.innerHTML = '<strong>执行失败：</strong>' + e.message;
+      ramSelResult.innerHTML = '<strong>执行失败：</strong>' + errHtml(e);
     } finally {
       btnRamKill.textContent = '结束已选应用';
       updateRamSel();
@@ -1019,7 +1054,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
         btnExec.disabled = list.processCount === 0;
         if(btnTrim) btnTrim.disabled = list.processCount === 0;
       } catch(e) {
-        body.innerHTML = '<div class="cleanup-hint">生成计划失败：' + e.message + '</div>';
+        body.innerHTML = '<div class="cleanup-hint">生成计划失败：' + errHtml(e) + '</div>';
       } finally {
         btnPlan.disabled = false;
         btnPlan.textContent = '重新生成计划';
@@ -1034,9 +1069,9 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       body.innerHTML =
         list.apps.map(a =>
           '<label class="pick-row">' +
-            '<input type="checkbox" checked data-key="'+a.key+'">' +
-            '<div class="pick-info"><div class="pick-name">'+a.name+'</div>' +
-            '<div class="pick-purpose">'+a.purpose+' · '+a.processCount+' 个进程</div></div>' +
+            '<input type="checkbox" checked data-key="'+escapeHtml(a.key)+'">' +
+            '<div class="pick-info"><div class="pick-name">'+escapeHtml(a.name)+'</div>' +
+            '<div class="pick-purpose">'+escapeHtml(a.purpose)+' · '+escapeHtml(a.processCount)+' 个进程</div></div>' +
             '<div class="pick-mem">'+fmt(a.workingSetBytes)+'</div>' +
           '</label>'
         ).join('') +
@@ -1084,22 +1119,22 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
         resultBox.style.display = '';
         if(r.error){
           resultBox.className = 'cleanup-result result-warn';
-          resultBox.innerHTML = '<strong>修剪被拒绝：</strong>' + apiErrorText(r);
+          resultBox.innerHTML = '<strong>修剪被拒绝：</strong>' + apiErrorHtml(r);
         } else {
           const ok = (r.succeeded||0) > 0;
           resultBox.className = 'cleanup-result ' + (ok ? 'result-ok' : 'result-warn');
           resultBox.innerHTML = '<strong>' + (ok ? '工作集修剪完成' : '没有进程被修剪') + '</strong>' +
-            '<div>成功 ' + (r.succeeded||0) + ' / ' + (r.requested||0) +
+            '<div>成功 ' + escapeHtml(r.succeeded||0) + ' / ' + escapeHtml(r.requested||0) +
             ' · 工作集合计下降 <strong>' + fmt(r.workingSetDeltaBytes||0) + '</strong>' +
             ' · 系统已用变化 ' + fmt(r.freedBytes||0) + '</div>' +
-            (r.systemDeltaNote ? '<div class="result-detail">'+r.systemDeltaNote+'</div>' : '') +
+            (r.systemDeltaNote ? '<div class="result-detail">'+escapeHtml(r.systemDeltaNote)+'</div>' : '') +
             '<div class="result-detail">修剪不会结束进程；未保存内容不会丢失。</div>';
           refreshSnapshot().then(() => render());
         }
       } catch(e) {
         resultBox.style.display = '';
         resultBox.className = 'cleanup-result result-warn';
-        resultBox.innerHTML = '<strong>修剪失败：</strong>' + e.message;
+        resultBox.innerHTML = '<strong>修剪失败：</strong>' + errHtml(e);
       } finally {
         btnTrim.disabled = false;
         btnTrim.textContent = '修剪工作集（不关程序）';
@@ -1123,14 +1158,14 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
         if(r.error){
           resultBox.style.display = '';
           resultBox.className = 'cleanup-result result-warn';
-          resultBox.innerHTML = '<strong>执行被拒绝：</strong>' + apiErrorText(r);
+          resultBox.innerHTML = '<strong>执行被拒绝：</strong>' + apiErrorHtml(r);
         } else {
           renderResult(r);
         }
       } catch(e) {
         resultBox.style.display = '';
         resultBox.className = 'cleanup-result result-warn';
-        resultBox.innerHTML = '<strong>执行失败：</strong>' + e.message;
+        resultBox.innerHTML = '<strong>执行失败：</strong>' + errHtml(e);
       } finally {
         btnExec.disabled = false;
         btnExec.textContent = '确认执行清理';
@@ -1143,17 +1178,17 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       resultBox.className = 'cleanup-result ' + (anyFreed ? 'result-ok' : 'result-warn');
       let html = '';
       if(anyFreed){
-        html += '<strong>清理完成：成功关闭 ' + r.succeeded + ' / ' + r.requested + ' 个进程</strong>';
-        html += '<div class="compare"><span>清理前 ' + fmt(r.beforeUsedBytes) + '（' + r.beforePercent + '%）</span>' +
-                '<span class="arrow">→</span><span class="after">清理后 ' + fmt(r.afterUsedBytes) + '（' + r.afterPercent + '%）</span></div>';
+        html += '<strong>清理完成：成功关闭 ' + escapeHtml(r.succeeded) + ' / ' + escapeHtml(r.requested) + ' 个进程</strong>';
+        html += '<div class="compare"><span>清理前 ' + fmt(r.beforeUsedBytes) + '（' + escapeHtml(r.beforePercent) + '%）</span>' +
+                '<span class="arrow">→</span><span class="after">清理后 ' + fmt(r.afterUsedBytes) + '（' + escapeHtml(r.afterPercent) + '%）</span></div>';
         html += '<div>实际释放 <strong>' + fmt(r.freedBytes) + '</strong></div>';
       } else {
         html += '<strong>没有进程被成功关闭</strong>';
-        html += '<div style="margin-top:8px">' + (r.systemDeltaNote || '') + '</div>';
+        html += '<div style="margin-top:8px">' + escapeHtml(r.systemDeltaNote || '') + '</div>';
       }
       if(r.failReasons && Object.keys(r.failReasons).length){
         html += '<div class="result-detail"><strong>失败原因：</strong><br>' +
-          Object.entries(r.failReasons).map(([k,v]) => '· ' + k + '（' + v + ' 个）').join('<br>') + '</div>';
+          Object.entries(r.failReasons).map(([k,v]) => '· ' + escapeHtml(k) + '（' + escapeHtml(v) + ' 个）').join('<br>') + '</div>';
       }
       html += '<div class="result-detail">真实释放量只在进程确实退出后才上报；系统内存的自然波动不计入效果。</div>';
       resultBox.innerHTML = html;
@@ -1183,10 +1218,10 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
         if(!d.drives) { grid.innerHTML = '<div class="card">请通过 启动.bat 打开服务后再查看磁盘</div>'; return; }
         grid.innerHTML = d.drives.map(v => {
           const pct = v.usedPercent || 0;
-          return '<div class="card drive-card"><h3>'+v.drive+' '+(v.volumeName||'')+'</h3>' +
+          return '<div class="card drive-card"><h3>'+escapeHtml(v.drive)+' '+escapeHtml(v.volumeName||'')+'</h3>' +
             '<div class="drive-bar"><i style="width:'+pct+'%"></i></div>' +
             '<div>已用 '+fmt(v.usedBytes)+' / '+fmt(v.totalBytes)+'（'+pct+'%）</div>' +
-            '<div style="color:var(--text-3);font-size:12px">剩余 '+fmt(v.freeBytes)+' · '+ (v.fileSystem||'') +'</div></div>';
+            '<div style="color:var(--text-3);font-size:12px">剩余 '+fmt(v.freeBytes)+' · '+ escapeHtml(v.fileSystem||'') +'</div></div>';
         }).join('');
       }).catch(() => {
         grid.innerHTML = '<div class="card">无法连接服务。请运行 启动.bat 后从 http://127.0.0.1:7788/ 打开。</div>';
@@ -1205,7 +1240,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       resultBox.style.display = '';
       if(r.error){
         resultBox.className = 'cleanup-result result-warn';
-        resultBox.innerHTML = '<strong>被拒绝：</strong>'+apiErrorText(r);
+        resultBox.innerHTML = '<strong>被拒绝：</strong>'+apiErrorHtml(r);
         return;
       }
       const ok = (r.succeeded||0) > 0;
@@ -1214,7 +1249,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       resultBox.className = 'cleanup-result '+(ok ? 'result-ok' : 'result-warn');
       let title;
       if(ok){
-        title = '删除完成：成功 '+r.succeeded+' / '+r.requested+' 个路径';
+        title = '删除完成：成功 '+escapeHtml(r.succeeded)+' / '+escapeHtml(r.requested)+' 个路径';
       } else if(skipped && !failed){
         title = '没有文件可删（目录已空）';
       } else {
@@ -1222,7 +1257,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       }
       resultBox.innerHTML = '<strong>'+title+'</strong>' +
         '<div>实际释放 <strong>'+fmt(r.freedBytes||0)+'</strong>'+(skipped ? ' · 跳过 '+skipped+' 个空目录' : '')+(failed ? ' · 失败 '+failed : '')+'</div>' +
-        (r.systemDeltaNote ? '<div class="result-detail">'+r.systemDeltaNote+'</div>' : '');
+        (r.systemDeltaNote ? '<div class="result-detail">'+escapeHtml(r.systemDeltaNote)+'</div>' : '');
     }
 
     btnJunk.addEventListener('click', async () => {
@@ -1235,7 +1270,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
         renderJunk(d);
         btnExec.disabled = pickedJunk.size === 0;
       } catch(e) {
-        body.innerHTML = '<div class="cleanup-hint">扫描失败：'+e.message+'</div>';
+        body.innerHTML = '<div class="cleanup-hint">扫描失败：'+errHtml(e)+'</div>';
       } finally {
         btnJunk.disabled = false; btnJunk.textContent = '重新扫描垃圾';
       }
@@ -1246,9 +1281,9 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       if(!list.length){ body.innerHTML = '<div class="cleanup-hint">没有发现可清理垃圾</div>'; return; }
       body.innerHTML = list.map(i =>
         '<label class="pick-row">' +
-          '<input type="checkbox" data-id="'+i.id+'" '+(i.risk==='safe'?'checked':'')+'>' +
-          '<div class="pick-info"><div class="pick-name">'+i.name+' <span class="risk-tag '+(i.risk==='safe'?'risk-safe':'risk-caution')+'">'+(i.risk==='safe'?'🟢可清':'🟡谨慎')+'</span></div>' +
-          '<div class="pick-purpose">'+i.purpose+'</div></div>' +
+          '<input type="checkbox" data-id="'+escapeHtml(i.id)+'" '+(i.risk==='safe'?'checked':'')+'>' +
+          '<div class="pick-info"><div class="pick-name">'+escapeHtml(i.name)+' <span class="risk-tag '+(i.risk==='safe'?'risk-safe':'risk-caution')+'">'+(i.risk==='safe'?'🟢可清':'🟡谨慎')+'</span></div>' +
+          '<div class="pick-purpose">'+escapeHtml(i.purpose)+'</div></div>' +
           '<div class="pick-mem">'+fmt(i.bytes)+'</div></label>'
       ).join('') + '<div class="cleanup-summary" id="junkSummary"></div>';
       body.querySelectorAll('input[type=checkbox]').forEach(cb => {
@@ -1286,7 +1321,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       } catch(e) {
         resultBox.style.display = '';
         resultBox.className = 'cleanup-result result-warn';
-        resultBox.innerHTML = '<strong>失败：</strong>'+e.message;
+        resultBox.innerHTML = '<strong>失败：</strong>'+errHtml(e);
       } finally {
         btnExec.disabled = false; btnExec.textContent = '确认删除勾选项';
       }
@@ -1357,11 +1392,11 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
           : '<span class="risk-tag risk-protected">不可删（安装目录/用户文件）</span>';
         return '<div class="app-row'+(checked?' is-picked':'')+'">' +
           '<label class="app-check">' +
-            '<input type="checkbox" data-name="'+a.name.replace(/"/g,'&quot;')+'"'+(checkable?'':' disabled title="没有白名单缓存，安装目录和文档不会删"')+(checked?' checked':'')+'>' +
+            '<input type="checkbox" data-name="'+escapeHtml(a.name)+'"'+(checkable?'':' disabled title="没有白名单缓存，安装目录和文档不会删"')+(checked?' checked':'')+'>' +
           '</label>' +
-          '<div class="app-main"><div class="app-title"><span class="app-name">'+a.name+'</span>'+tag+'</div>' +
-          '<div class="app-purpose">'+a.purpose+'</div>' +
-          '<div class="app-meta">'+a.category+' · '+a.vendor+(checkable ? ' · 勾选后只删：'+junk.map(j=>j.name).join('、') : '')+'</div></div>' +
+          '<div class="app-main"><div class="app-title"><span class="app-name">'+escapeHtml(a.name)+'</span>'+tag+'</div>' +
+          '<div class="app-purpose">'+escapeHtml(a.purpose)+'</div>' +
+          '<div class="app-meta">'+escapeHtml(a.category)+' · '+escapeHtml(a.vendor)+(checkable ? ' · 勾选后只删：'+escapeHtml(junk.map(j=>j.name).join('、')) : '')+'</div></div>' +
           '<div class="app-side"><div class="app-mem"><div class="m">'+fmt(a.bytes)+'</div><div class="p">占用</div></div></div></div>';
       }).join('');
 
@@ -1408,7 +1443,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       } catch(e) {
         resultBox.style.display = '';
         resultBox.className = 'cleanup-result result-warn';
-        resultBox.innerHTML = '<strong>失败：</strong>'+e.message;
+        resultBox.innerHTML = '<strong>失败：</strong>'+errHtml(e);
       } finally {
         btnDiskAppDel.disabled = false; btnDiskAppDel.textContent = '删除已选缓存';
         updateDiskAppSel();
@@ -1428,9 +1463,63 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       const btnExec = document.getElementById('btnMigExec');
       const btnInspect = document.getElementById('btnMigInspect');
       const btnRollback = document.getElementById('btnMigRollback');
+      const rollbackSel = document.getElementById('migRollbackRecord');
       const inspectPath = document.getElementById('migInspectPath');
       if(!sel || !btnLoad) return;
       let lastCheck = null;
+      let rollbackRecords = [];
+
+      // 转义统一走外层唯一的 escapeHtml（见文件上方定义）：
+      //   此前这里另有一份 escHtml / escapeHtml 副本，且少了单引号转义。
+      //   两份实现一旦漂移，属性上下文（'...'）就会出现漏转义（M-04）。
+      const fmtBytes = n => {
+        const v = Number(n) || 0;
+        return v >= 1073741824 ? (v / 1073741824).toFixed(2) + ' GB' :
+          v >= 1048576 ? (v / 1048576).toFixed(2) + ' MB' :
+          v >= 1024 ? (v / 1024).toFixed(1) + ' KB' : v + ' B';
+      };
+      function renderRollbackRecords(data){
+        rollbackRecords = (data.records || []).filter(r => !r.rolledBack);
+        if(!rollbackSel) return;
+        rollbackSel.innerHTML = '<option value="">（选择要撤销的迁移记录）</option>' +
+          rollbackRecords.map((r, i) => {
+            const when = r.migratedAt ? new Date(r.migratedAt).toLocaleString() : '时间未知';
+            return '<option value="' + i + '">' + escapeHtml((r.source || '') + ' → ' + (r.destination || '') +
+              ' · ' + when + ' · ' + (r.files || 0) + ' 文件 / ' + fmtBytes(r.bytes)) + '</option>';
+          }).join('');
+        btnRollback.disabled = true;
+      }
+      async function loadRollbackRecords(){
+        if(!rollbackSel) return;
+        rollbackSel.disabled = true;
+        try {
+          const r = await (await apiFetch('/api/disk/migrate/records')).json();
+          if(r.error) throw new Error(apiErrorText(r));
+          renderRollbackRecords(r);
+          hint.textContent = rollbackRecords.length ?
+            '已加载 ' + rollbackRecords.length + ' 条待撤销记录，请明确选择一条；不会按手动填写的源路径猜测记录。' :
+            '没有找到尚未撤销的迁移记录。';
+        } catch(e) {
+          rollbackSel.innerHTML = '<option value="">加载失败</option>';
+          hint.textContent = '迁移记录加载失败：' + e.message;
+        } finally { rollbackSel.disabled = false; }
+      }
+
+      /**
+       * 取「当前明确选中的那条待撤销记录」；没选/选择非法一律返回 null。
+       *
+       * 为什么必须单独抽一个函数：
+       *   占位项的值是空字符串，而 JS 里 `Number('') === 0` 且 `Number.isInteger(0) === true`，
+       *   于是 `Number.isInteger(Number(sel.value))` 在**什么都没选**时也成立，
+       *   会把「空选择」当成索引 0 —— 用户清空选择后点撤销，会撤销掉列表里第一条记录。
+       *   这里显式拒掉空值与越界索引（与后端 M-07 的「空值被误当默认值」同一类坑）。
+       */
+      function selectedRollbackRecord(){
+        if(!rollbackSel || rollbackSel.value === '') return null;
+        const index = Number(rollbackSel.value);
+        if(!Number.isInteger(index) || index < 0 || index >= rollbackRecords.length) return null;
+        return rollbackRecords[index];
+      }
 
       function showResult(ok, html){
         resultBox.style.display = '';
@@ -1443,10 +1532,16 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       // 把目标盘的**最新**数据搬回原位 → 逐项校验一致后才清理目标盘副本，
       // 并在迁移记录上打 rolledBack / rolledBackAt 标记。
       if(btnRollback) btnRollback.addEventListener('click', async () => {
-        const source = src.value.trim();
-        if(!source){ showResult(false, '请先填写要撤销的源路径。'); return; }
-        if(!confirm('确认撤销这次迁移？\n\n' +
-          '· 会把数据从目标盘**搬回原位**（搬回的是目标盘的最新数据）\n' +
+        const rec = selectedRollbackRecord();
+        if(!rec){ showResult(false, '请先从「待撤销迁移记录」中明确选择一条记录。'); return; }
+        const source = String(rec.source || '').trim();
+        if(!source){ showResult(false, '所选迁移记录缺少源路径，已停止。'); return; }
+        if(!confirm('确认撤销以下迁移？\n\n' +
+          '源路径：' + source + '\n' +
+          '目标路径：' + String(rec.destination || '') + '\n' +
+          '迁移时间：' + (rec.migratedAt ? new Date(rec.migratedAt).toLocaleString() : '未知') + '\n' +
+          '规模：' + (rec.files || 0) + ' 个文件 / ' + fmtBytes(rec.bytes) + '\n\n' +
+          '· 会把目标盘的最新数据搬回原位\n' +
           '· 原位置的目录链接会被移除\n' +
           '· 目标盘副本会被清理（可从回收站还原）\n' +
           '· 备份目录仍按原策略保留\n\n' +
@@ -1461,27 +1556,45 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
             body: JSON.stringify({ source: source })
           })).json();
           if(r.error){
-            showResult(false, '撤销失败：' + (r.error.message || r.error.code));
+            showResult(false, '撤销失败：' + apiErrorHtml(r));
             return;
           }
           showResult(true,
             '<strong>已撤销迁移</strong><br>' +
-            '源路径：' + r.source + '<br>' +
-            '原目标盘：' + r.destination + '<br>' +
-            '已搬回 <strong>' + r.restoredFiles + '</strong> 个文件（' +
+            '源路径：' + escapeHtml(r.source) + '<br>' +
+            '原目标盘：' + escapeHtml(r.destination) + '<br>' +
+            '已搬回 <strong>' + escapeHtml(r.restoredFiles) + '</strong> 个文件（' +
             (r.restoredBytes / 1048576).toFixed(2) + ' MB）<br>' +
             (r.destRemoved ? '目标盘副本已清理（回收站可还原）<br>' : '目标盘副本已保留<br>') +
-            (r.backupKept ? '备份仍保留：' + r.backupKept + '<br>' : '') +
-            '记录已标记 <code>rolledBack</code>：' + (r.rolledBackAt || ''));
+            (r.backupKept ? '备份仍保留：' + escapeHtml(r.backupKept) + '<br>' : '') +
+            '记录已标记 <code>rolledBack</code>：' + escapeHtml(r.rolledBackAt || ''));
           lastCheck = null;
           btnExec.disabled = true;
+          await loadRollbackRecords();
         } catch(e){
-          showResult(false, '撤销请求失败：' + e.message);
+          showResult(false, '撤销请求失败：' + errHtml(e));
         } finally {
           btnRollback.disabled = false;
           btnRollback.textContent = old;
         }
       });
+
+      if(rollbackSel) rollbackSel.addEventListener('change', () => {
+        const rec = selectedRollbackRecord();
+        btnRollback.disabled = !rec;
+        if(rec){
+          src.value = rec.source || '';
+          dst.value = rec.destination || '';
+          typeEl.value = rec.linkType === 'symlink' ? 'symlink' : 'junction';
+          hint.textContent = '已选择迁移记录：' + (rec.source || '') + ' → ' + (rec.destination || '') +
+            '；撤销按钮只会处理这条记录。';
+        } else {
+          // 清空选择（或选择非法）时必须把提示同步回「没选」的状态：
+          // 否则按钮虽然禁用了，文案还写着「已选择迁移记录：…」，用户会以为撤销仍指向那一条。
+          hint.textContent = '已取消选择。请先从「待撤销迁移记录」中明确选一条，撤销按钮才会启用。';
+        }
+      });
+      if(rollbackSel) loadRollbackRecords();
 
       btnLoad.addEventListener('click', async () => {
         btnLoad.disabled = true; btnLoad.textContent = '检测中…';
@@ -1497,10 +1610,9 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
           const reasonOf = i => (i.blockers || []).map(b => b.message).join('；') || '不满足迁移硬条件';
           const optOf = (i, disabled) => {
             const p = String(i.path || (i.paths && i.paths[0]) || '');
-            const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-            const label = (disabled ? '⛔ ' : '') + esc(i.name) +
-              (disabled ? ' — ' + esc(reasonOf(i)) : ' — ' + esc(p));
-            return '<option value="' + esc(disabled ? '' : p) + '"' +
+            const label = (disabled ? '⛔ ' : '') + escapeHtml(i.name) +
+              (disabled ? ' — ' + escapeHtml(reasonOf(i)) : ' — ' + escapeHtml(p));
+            return '<option value="' + escapeHtml(disabled ? '' : p) + '"' +
               (disabled ? ' disabled' : '') + '>' + label + '</option>';
           };
           sel.innerHTML = '<option value="">（手动填写源路径）</option>' +
@@ -1533,25 +1645,25 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
           })).json();
           lastCheck = r;
           if(r.error){
-            showResult(false, '<strong>预检失败：</strong>'+apiErrorText(r));
+            showResult(false, '<strong>预检失败：</strong>'+apiErrorHtml(r));
             btnExec.disabled = true;
             return;
           }
           if(!r.ok){
-            const lines = (r.issues||[]).map(i => '· '+i.message).join('<br>');
+            const lines = (r.issues||[]).map(i => '· '+escapeHtml(i.message)).join('<br>');
             showResult(false, '<strong>预检未通过</strong><div class="result-detail">'+lines+'</div>');
             btnExec.disabled = true;
             return;
           }
           showResult(true,
             '<strong>预检通过</strong>' +
-            '<div>源 '+r.source+' → 目标 '+r.destination+'</div>' +
-            '<div>文件 '+r.stats.files+' 个 / '+fmt(r.stats.bytes)+' · 链接类型 '+r.linkType+'</div>' +
-            '<div class="result-detail">'+r.occupiedHint+' 成功后备份保留 '+r.keepBackupDays+' 天。</div>'
+            '<div>源 '+escapeHtml(r.source)+' → 目标 '+escapeHtml(r.destination)+'</div>' +
+            '<div>文件 '+escapeHtml(r.stats.files)+' 个 / '+fmt(r.stats.bytes)+' · 链接类型 '+escapeHtml(r.linkType)+'</div>' +
+            '<div class="result-detail">'+escapeHtml(r.occupiedHint)+' 成功后备份保留 '+escapeHtml(r.keepBackupDays)+' 天。</div>'
           );
           btnExec.disabled = false;
         } catch(e) {
-          showResult(false, '<strong>预检失败：</strong>'+e.message);
+          showResult(false, '<strong>预检失败：</strong>'+errHtml(e));
           btnExec.disabled = true;
         } finally {
           btnCheck.disabled = false; btnCheck.textContent = '预检';
@@ -1574,19 +1686,19 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
             })
           })).json();
           if(r.error){
-            showResult(false, '<strong>迁移失败（已回滚）：</strong>'+apiErrorText(r));
+            showResult(false, '<strong>迁移失败（已回滚）：</strong>'+apiErrorHtml(r));
           } else if(!r.executed){
-            showResult(false, '<strong>未执行：</strong>'+(r.message || '仍是 dry-run'));
+            showResult(false, '<strong>未执行：</strong>'+escapeHtml(r.message || '仍是 dry-run'));
           } else {
             showResult(true,
               '<strong>迁移成功</strong>' +
-              '<div>链接类型 '+r.linkType+' · 文件 '+r.files+' 个 / '+fmt(r.bytes)+'</div>' +
-              '<div>备份 '+r.backupPath+'（保留至 '+r.expireAt+'）</div>' +
-              '<div class="result-detail">'+(r.message||'')+'</div>'
+              '<div>链接类型 '+escapeHtml(r.linkType)+' · 文件 '+escapeHtml(r.files)+' 个 / '+fmt(r.bytes)+'</div>' +
+              '<div>备份 '+escapeHtml(r.backupPath)+'（保留至 '+escapeHtml(r.expireAt)+'）</div>' +
+              '<div class="result-detail">'+escapeHtml(r.message||'')+'</div>'
             );
           }
         } catch(e) {
-          showResult(false, '<strong>迁移失败：</strong>'+e.message);
+          showResult(false, '<strong>迁移失败：</strong>'+errHtml(e));
         } finally {
           btnExec.disabled = false; btnExec.textContent = '确认搬走并建链接';
         }
@@ -1598,18 +1710,18 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
         try {
           const r = await (await apiFetch('/api/disk/migrate/inspect?path='+encodeURIComponent(pth))).json();
           if(r.error){
-            showResult(false, '<strong>检查失败：</strong>'+apiErrorText(r));
+            showResult(false, '<strong>检查失败：</strong>'+apiErrorHtml(r));
             return;
           }
           const kind = r.broken ? '断链' : (r.linkKind || r.type);
           showResult(!r.broken,
-            '<strong>检查结果：'+kind+'</strong>' +
-            '<div>路径 '+r.path+'</div>' +
-            (r.target ? '<div>指向 '+r.target+'</div>' : '') +
+            '<strong>检查结果：'+escapeHtml(kind)+'</strong>' +
+            '<div>路径 '+escapeHtml(r.path)+'</div>' +
+            (r.target ? '<div>指向 '+escapeHtml(r.target)+'</div>' : '') +
             '<div>存在 '+(r.exists?'是':'否')+' · 链接 '+(r.isLink?'是':'否')+' · 断链 '+(r.broken?'是':'否')+'</div>'
           );
         } catch(e) {
-          showResult(false, '<strong>检查失败：</strong>'+e.message);
+          showResult(false, '<strong>检查失败：</strong>'+errHtml(e));
         }
       });
     })();
@@ -1633,7 +1745,7 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
         });
         renderDiskApps();
       } catch(e) {
-        listEl.innerHTML = '<div class="cleanup-hint">扫描失败：'+e.message+'</div>';
+        listEl.innerHTML = '<div class="cleanup-hint">扫描失败：'+errHtml(e)+'</div>';
       } finally {
         btnApps.disabled = false; btnApps.textContent = '按应用看占用（较慢）';
       }

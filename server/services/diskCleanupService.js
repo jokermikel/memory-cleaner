@@ -181,12 +181,22 @@ function plan(opts = {}) {
 }
 
 function deleteContents(dirPath) {
-  // 只删目录内的文件/子目录，保留目录本身（Temp 这类系统文件夹必须留下）
+  // 只删目录内的文件/子目录，保留目录本身（Temp 这类系统文件夹必须留下）。
+  // 根目录或任一级直接子项是 reparse point 时拒绝，避免路径竞态跟随 junction/symlink。
   // 按真实文件数和字节数上报，空目录记为 skipped，不再假装成功。
   const ps = `
-    $ErrorActionPreference = 'SilentlyContinue'
+    $ErrorActionPreference = 'Stop'
     $p = '${String(dirPath).replace(/'/g, "''")}'
     if (-not (Test-Path -LiteralPath $p)) { 'MISSING'; exit 0 }
+    $root = Get-Item -LiteralPath $p -Force
+    if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { 'REPARSE_ROOT'; exit 0 }
+    $children = @(Get-ChildItem -LiteralPath $p -Force)
+    foreach ($child in $children) {
+      if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        'REPARSE_CHILD|' + $child.FullName
+        exit 0
+      }
+    }
     $files = @(Get-ChildItem -LiteralPath $p -Force -Recurse -File -ErrorAction SilentlyContinue)
     $beforeCount = $files.Count
     $beforeBytes = [int64]0
@@ -204,6 +214,9 @@ function deleteContents(dirPath) {
     }).trim();
     if (out === 'MISSING') {
       return { ok: false, skipped: true, error: 'path_missing', beforeCount: 0, afterCount: 0, deletedBytes: 0 };
+    }
+    if (out === 'REPARSE_ROOT' || out.startsWith('REPARSE_CHILD|')) {
+      return { ok: false, skipped: false, error: 'reparse_point_refused', beforeCount: 0, afterCount: 0, deletedBytes: 0 };
     }
     const parts = out.split('|').map(Number);
     const beforeCount = parts[0] || 0;

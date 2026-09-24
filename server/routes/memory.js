@@ -17,11 +17,28 @@ const { sampleDiskIo } = require('../services/diskIoGuard');
 const cacheMigrate = require('../services/cacheMigrateService');
 
 /** 参数校验：把字符串解析为正整数，非法返回 null */
-function parseIntParam(v, min = 0) {
+function parseIntParam(v, min = 0, max = Number.MAX_SAFE_INTEGER) {
   if (v === undefined || v === null || v === '') return null;
   const n = Number(v);
-  if (!Number.isInteger(n) || n < min) return null;
+  if (!Number.isInteger(n) || n < min || n > max) return null;
   return n;
+}
+
+const MAX_LIST_LIMIT = 500;
+const MAX_LIST_OFFSET = 100000;
+
+/**
+ * 参数夹取：解析为正整数后夹到 [min, max]；无法解析时仍返回 null。
+ *
+ * 为什么不能用 parseIntParam 的上限做分页：
+ *   超出上限时 parseIntParam 返回 null，调用方的 `if (limit)` 会退化成
+ *   「不传 limit」= 返回全部条目 —— 即 `?limit=999999` 反而拿到全量列表，
+ *   「上限」形同虚设（M-07）。分页参数改用夹取后，超限请求至多拿到上限条数。
+ */
+function clampIntParam(v, min, max) {
+  const n = parseIntParam(v, min, Number.MAX_SAFE_INTEGER);
+  if (n === null) return null;
+  return Math.min(n, max);
 }
 
 /** 参数校验：从白名单取值，非法返回默认值 */
@@ -51,7 +68,7 @@ function sendError(res, status, code, message, detail) {
 function handleSnapshot(query, res) {
   try {
     const data = snapshot(true);
-    const limit = parseIntParam(query.limit, 1);
+    const limit = clampIntParam(query.limit, 1, MAX_LIST_LIMIT);
     if (limit) data.apps = data.apps.slice(0, limit);
     sendJson(res, 200, data);
   } catch (e) {
@@ -101,9 +118,9 @@ function handleApps(query, res) {
     if (sort === 'name') apps = [...apps].sort((a, b) => a.name.localeCompare(b.name, 'zh'));
     // 默认已按内存降序（groupApps 已排）
 
-    // 分页
-    const limit = parseIntParam(query.limit, 1);
-    const offset = parseIntParam(query.offset, 0) || 0;
+    // 分页（超上限一律夹到上限，避免「超限 = 返回全部」的反向退化）
+    const limit = clampIntParam(query.limit, 1, MAX_LIST_LIMIT);
+    const offset = clampIntParam(query.offset, 0, MAX_LIST_OFFSET) || 0;
     const total = apps.length;
     const sliced = limit ? apps.slice(offset, offset + limit) : apps.slice(offset);
 
@@ -139,7 +156,7 @@ function handleProcesses(query, res) {
       list = list.filter(p => p.name.toLowerCase().includes(kw));
     }
 
-    const limit = parseIntParam(query.limit, 1);
+    const limit = clampIntParam(query.limit, 1, MAX_LIST_LIMIT);
     const total = list.length;
     const sliced = limit ? list.slice(0, limit) : list;
 
@@ -296,6 +313,12 @@ async function handleMigratePresets(query, res) {
     // 前端据此把不满足硬条件的条目渲染为禁用（附原因），可选的才允许点击。
     sendJson(res, 200, await cacheMigrate.assessPresets());
   } catch (e) {
+    // 评估已有并发互斥（M-05）：正在评估时第二次请求必须回传 ASSESS_BUSY，
+    // 而不是折成 500 MIGRATE_PRESETS_FAILED —— 前者「稍后重试即可」是可操作的，
+    // 后者会被当成服务故障。409 与 DISK_BUSY 同族：本机状态导致当前不可完成。
+    if (e && e.code === 'ASSESS_BUSY') {
+      return sendError(res, 409, 'ASSESS_BUSY', e.message);
+    }
     sendError(res, 500, 'MIGRATE_PRESETS_FAILED', '读取可迁移缓存清单失败', e.message);
   }
 }
@@ -316,6 +339,12 @@ function handleMigrateRecords(query, res) {
   try {
     sendJson(res, 200, cacheMigrate.listMigrations());
   } catch (e) {
+    // 状态文件损坏（M-08）必须原样透出，不能折成通用 500：
+    // 若被包装成「读取迁移记录失败」，界面会把「记录损坏、需人工复核」
+    // 误读成「暂时读不到」，而损坏文件本身又必须保留待查。
+    if (e && (e.code === 'STATE_CORRUPTED' || e.code === 'STATE_WRITE_FAILED')) {
+      return sendError(res, 409, e.code, e.message);
+    }
     sendError(res, 500, 'MIGRATE_RECORDS_FAILED', '读取迁移记录失败', e.message);
   }
 }
@@ -324,7 +353,8 @@ const MIGRATE_CLIENT_CODES = new Set([
   'NOT_CONFIRMED', 'CRITICAL_PATH', 'SOURCE_MISSING', 'SOURCE_IS_LINK',
   'SOURCE_NOT_DIR', 'SAME_PATH', 'DEST_INSIDE_SOURCE', 'SOURCE_INSIDE_DEST',
   'VOLUME_UNKNOWN', 'DISK_FULL', 'DEST_EXISTS', 'COPY_MISMATCH',
-  'SOURCE_IN_USE', 'LINK_FAILED', 'LINK_NOT_DETECTED', 'PROBE_FAILED'
+  'SOURCE_IN_USE', 'LINK_FAILED', 'LINK_NOT_DETECTED', 'PROBE_FAILED',
+  'MIGRATION_BUSY', 'STATE_CORRUPTED', 'STATE_WRITE_FAILED', 'BAD_SOURCE', 'ASSESS_BUSY'
 ]);
 
 /** 撤销迁移（回滚）专属的客户端错误码 —— 与迁移执行区分开，便于前端分别提示 */

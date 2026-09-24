@@ -26,4 +26,4 @@ It is **zero-dependency** — the backend uses only Node.js built-in modules (`h
 
 > **中文**：一个零依赖的 Windows 内存/磁盘清理工具，按应用归组展示占用与用途，带九道安全闸门守护清理。
 >
-> **English**: A zero-dependency Windows memory & disk cleaner that groups usage by application and guards every cleanup with eight safety gates.
+> **English**: A zero-dependency Windows memory & disk cleaner that groups usage by application and guards every cleanup with nine safety gates.

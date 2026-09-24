@@ -133,7 +133,7 @@ Why even read endpoints need a token: `/api/disk/snapshot` and `/api/disk/apps` 
 | `GET /api/disk/apps` | Disk usage grouped by application |
 | `GET /api/disk/cleanup/plan` | Disk cleanup plan (dry-run) |
 | `POST /api/disk/cleanup/execute` | Execute disk cleanup (requires confirmed=true, allowlisted paths only) |
-| `GET /api/disk/migrate/presets` | Common cache directories that can be relocated |
+| `GET /api/disk/migrate/presets` | Assess preset cache directories for relocation; requires the page token |
 | `GET /api/disk/migrate/inspect?path=` | Link inspector (normal dir / junction / symlink / broken link) |
 | `GET /api/disk/migrate/records` | Relocation records |
 | `POST /api/disk/migrate/precheck` | Relocation precheck |
@@ -217,10 +217,11 @@ The app assumes no username and hardcodes no drive letter — it runs fully on a
 The test scaffolding (`server/services/__tests__/`) runs on the maintainer's machine only and is **not distributed with the repo** — it contains machine-specific paths and process names.
 Below are the test results; full details are in **`最终测试报告.md`** at the repo root.
 
-To rerun locally as the maintainer:
+To rerun locally as the maintainer (**the I/O shim is required on this machine**, otherwise the
+execution channel produces `spawnSync ... EBUSY` false failures):
 
 ```bash
-node --test server/services/__tests__/*.test.js
+NODE_OPTIONS="--require=<repo-root>/_shim_childio.js" node --test server/services/__tests__/*.test.js
 ```
 
 Node 24 requires the `*.test.js` glob; passing just the directory fails.
@@ -232,24 +233,33 @@ Node 24 requires the `*.test.js` glob; passing just the directory fails.
 | Existing unit tests (grouping conservation, risk rating, safety gates, disk cleanup, elevation, sweep timing, etc.) | **96/96 passed** (14 suites) |
 | Added: undocumented-kernel-API scan, busy-disk gate, working-set trim gate | Passed |
 | Added: cache relocation in a sandbox (`mklink /J` inside `%TEMP%` + probe + rollback rejection cases) | 9/9 passed |
-| Added: RAM modules 0 / 1 (PowerShell collapsing to an object) / N | Passed |
+| Added: RAM modules 0 / 1 (collapsed to an object) / N | Passed |
 | Added: standalone batch-limit gate, forbidden paths for all drives, dynamic junk-scan drive letter, PID-reuse fallback, per-process freed-memory accounting | 12/12 passed |
 | Added: dictionary free of machine-specific values, CLI and server sharing one junk list, dead code removal | 4/4 passed |
-| Rerun of all the above | **96/96 passed** (2026-09-23, Windows 11 10.0.26200.9457) |
+| Added: preset cache-directory assessment | H1–H6 checks; live API run: 15 of 20 relocatable, 5 disabled with reasons; ~2 s |
+| **Latest unit tests** | **133/133 passed** (17 suites, 2026-09-24) |
+| **Latest targeted HTTP tests** | **60/60 passed** (2026-09-24) |
+| **Latest end-to-end tests** | **165/165 passed** (T0–T13, 2026-09-24; 585.4 s) |
+| **Real-environment verification** | Controlled real cache relocation + rollback **29/29** (Edge cache, 1302 files / 367 MB, byte-identical per-file SHA256 restore) · Real user-directory deletion + full restore **23/23** · UI click acceptance **18/18** |
 
-End-to-end **150 checks** (T0~T12, including HTTP access control and the P2 regressions) also run locally only and are not distributed.
+The security-review items M-01 – M-08 (reparse-point protection on delete, migration serialization +
+atomic state writes, fail-closed PID verification, unified front-end escaping, assessment mutual
+exclusion + cancellation, expired-backup purge wiring, list pagination caps, explicit corrupted-state
+handling) are all fixed and closed; the self-check cases live in
+`server/services/__tests__/securityRegression.test.js` (6 cases). The real-environment pass also found
+and fixed 2 UI defects (empty rollback-selection resolving to record #0; stale hint text after clearing).
 
-The older full-function pass (collection / process termination / HTTP / UI / CLI) is in the historical record: 47 checks passed at the time.
+End-to-end numbers come from `tests/test-results.json`; the scaffolding runs locally only and is not
+distributed. For the security-review evidence see sections 8–9 of
+`项目安全与质量复审报告_20260924_修正版.md`.
 
-### Not Covered (Manual, On Real Machines)
+### Still To Do (Manual, On Real Machines)
 
 | Item | Note |
 |---|---|
-| Click through the new UI buttons | Precheck / confirm for "trim working sets" and "relocate cache", plus "show all" for disk apps — no real UI click testing |
-| Relocating a real cache directory | Not run against production browser / game paths; only verified in a `%TEMP%` sandbox |
-| Junction still valid after reboot | Should survive per NTFS semantics; not verified with an actual reboot |
-| Repeated cleanup during large downloads | No blue-screen stress test; the code refuses cleanup under high I/O, which is not a substitute for real testing |
-| ≥24 hour loop | Not run |
+| ≥24 hour loop stability test | **The only remaining acceptance item**; needs a long uninterrupted run, then a check of service liveness, memory curve and logs |
+| Orphaned migration backup (379.4 MB) | Awaiting your decision; its record was removed from the state file, so the program can no longer reach it |
+| Commit and push the current changes | Awaiting review; all verified, but per convention the assistant did not commit on your behalf |
 
 ## Security Notes
 

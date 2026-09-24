@@ -43,6 +43,7 @@ server/services/__tests__/
 # baseline.json 由 tests\regenerate-baseline.js 本地生成，含本机源码哈希
 _*.js
 _*.txt
+_*_results.json
 _http_gate_results.json
 tests/
 baseline.json

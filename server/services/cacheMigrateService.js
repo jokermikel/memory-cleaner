@@ -18,6 +18,19 @@ const WS = path.join(__dirname, '..', '..');
 const LOG_DIR = path.join(WS, 'logs');
 const STATE_FILE = path.join(WS, 'data', 'cache-migrations.json');
 const DEFAULT_KEEP_DAYS = 7;
+const MIGRATION_LOCKS = new Map();
+
+function lockKey(source) {
+  return normalize(source || '');
+}
+
+async function withMigrationLock(source, fn) {
+  const key = lockKey(source);
+  if (!key) throw fail('BAD_SOURCE', '源路径不能为空');
+  if (MIGRATION_LOCKS.has(key)) throw fail('MIGRATION_BUSY', '该源目录已有迁移或撤销操作正在进行，请稍后重试');
+  MIGRATION_LOCKS.set(key, true);
+  try { return await fn(); } finally { MIGRATION_LOCKS.delete(key); }
+}
 
 function ensureDir(d) {
   try { fs.mkdirSync(d, { recursive: true }); } catch (e) { /* ignore */ }
@@ -279,15 +292,26 @@ function driveFreeBytes(letter) {
 function loadState() {
   try {
     if (!fs.existsSync(STATE_FILE)) return { records: [] };
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (!parsed || !Array.isArray(parsed.records)) throw new Error('records 不是数组');
+    return parsed;
   } catch (e) {
-    return { records: [] };
+    audit('STATE-CORRUPTED ' + e.message);
+    throw fail('STATE_CORRUPTED', '迁移状态文件损坏，请保留原文件并人工复核：' + e.message);
   }
 }
 
 function saveState(state) {
   ensureDir(path.dirname(STATE_FILE));
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  const tmp = STATE_FILE + '.tmp-' + process.pid + '-' + Date.now();
+  const data = JSON.stringify(state, null, 2) + '\n';
+  try {
+    fs.writeFileSync(tmp, data, 'utf8');
+    fs.renameSync(tmp, STATE_FILE);
+  } catch (e) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (ignore) { }
+    throw fail('STATE_WRITE_FAILED', '迁移状态文件写入失败：' + e.message);
+  }
 }
 
 function loadPresets() {
@@ -349,6 +373,7 @@ function loadPresets() {
  *            budgetMs: number, assessedAt: string, elapsedMs: number}>}
  */
 const ASSESS_BUDGET_MS = 2500;
+let assessInFlight = false;
 const SYSTEM_RESERVED_NAMES = ['$recycle.bin', 'system volume information'];
 
 function systemTreesLower() {
@@ -364,6 +389,8 @@ function systemTreesLower() {
 
 async function probeSourceLockedAsync(root, opts = {}) {
   const openFile = typeof opts.openFile === 'function' ? opts.openFile : defaultOpenFileAsync;
+  const signal = opts.signal;
+  const cancelled = () => !!(signal && signal.aborted);
   const walkDeadline = Date.now() + (opts.walkMs != null ? opts.walkMs : PROBE_WALK_MS);
   const walkCap = opts.walkFiles != null ? opts.walkFiles : PROBE_WALK_FILES;
 
@@ -387,14 +414,14 @@ async function probeSourceLockedAsync(root, opts = {}) {
 
   const candidates = [];
   async function walk(p) {
-    if (candidates.length >= walkCap || Date.now() > walkDeadline) {
+    if (cancelled() || candidates.length >= walkCap || Date.now() > walkDeadline) {
       result.truncated = true;
       return;
     }
     let entries;
     try { entries = await fs.promises.readdir(p, { withFileTypes: true }); } catch (e) { return; }
     for (const e of entries) {
-      if (candidates.length >= walkCap || Date.now() > walkDeadline) {
+      if (cancelled() || candidates.length >= walkCap || Date.now() > walkDeadline) {
         result.truncated = true;
         return;
       }
@@ -424,7 +451,7 @@ async function probeSourceLockedAsync(root, opts = {}) {
 
   const openDeadline = Date.now() + (opts.openMs != null ? opts.openMs : PROBE_OPEN_MS);
   for (const c of picked) {
-    if (Date.now() > openDeadline) break;
+    if (cancelled() || Date.now() > openDeadline) break;
     result.sampled += 1;
     try {
       // 兼容同步注入的 openFile（单测模拟文件锁）；真实实现内部是异步 open
@@ -443,10 +470,14 @@ async function defaultOpenFileAsync(p) {
 }
 
 async function assessPresets(opts = {}) {
-  const started = Date.now();
-  const items = Array.isArray(opts.items) ? opts.items : loadPresets();
-  const budgetMs = Number.isFinite(opts.budgetMs) ? opts.budgetMs : ASSESS_BUDGET_MS;
-  const trees = systemTreesLower();
+  if (assessInFlight) throw fail('ASSESS_BUSY', '预置目录正在评估，请稍后重试');
+  assessInFlight = true;
+  const controller = new AbortController();
+  try {
+    const started = Date.now();
+    const items = Array.isArray(opts.items) ? opts.items : loadPresets();
+    const budgetMs = Number.isFinite(opts.budgetMs) ? opts.budgetMs : ASSESS_BUDGET_MS;
+    const trees = systemTreesLower();
 
   // ── 阶段 1：H1~H4 同步廉价静态检查（文件系统元数据，无子进程）──
   const out = new Map();       // id(index) -> 结果
@@ -491,7 +522,7 @@ async function assessPresets(opts = {}) {
   // ── 阶段 2：H5 并发异步抽样（race 预算保险丝）──
   const jobs = pending.map(job => {
     const j = { ...job, done: false, probe: null, failed: false };
-    j.p = probeSourceLockedAsync(job.target, opts.probe || {})
+    j.p = probeSourceLockedAsync(job.target, { ...(opts.probe || {}), signal: controller.signal })
       .then(p => { j.probe = p; j.done = true; })
       .catch(() => { j.failed = true; j.done = true; });
     return j;
@@ -499,7 +530,7 @@ async function assessPresets(opts = {}) {
   let timer = null;
   await Promise.race([
     Promise.all(jobs.map(j => j.p)),
-    new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, budgetMs)); })
+    new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve(); }, Math.max(0, budgetMs)); })
   ]);
   if (timer) clearTimeout(timer);
 
@@ -538,6 +569,10 @@ async function assessPresets(opts = {}) {
     assessedAt: new Date().toISOString(),
     elapsedMs: Date.now() - started
   };
+  } finally {
+    controller.abort();
+    assessInFlight = false;
+  }
 }
 
 function inspectPath(targetPath) {
@@ -859,7 +894,7 @@ async function rollback(state) {
   return notes;
 }
 
-async function execute(opts = {}) {
+async function executeUnlocked(opts = {}) {
   const dryRun = opts.dryRun !== false;
   const check = precheck(opts.source, opts.destination, opts);
   if (!check.ok) {
@@ -999,6 +1034,10 @@ async function execute(opts = {}) {
   }
 }
 
+async function execute(opts = {}) {
+  return withMigrationLock(opts.source, () => executeUnlocked(opts));
+}
+
 function inspect(targetPath) {
   return inspectPath(targetPath);
 }
@@ -1028,7 +1067,7 @@ function listMigrations() {
  * @param {{keepDestCopy?: boolean}} [opts]
  * @returns {Promise<object>}
  */
-async function rollbackMigration(src, opts = {}) {
+async function rollbackMigrationUnlocked(src, opts = {}) {
   const source = path.resolve(expand(src));
   const state = loadState();
   state.records = Array.isArray(state.records) ? state.records : [];
@@ -1125,20 +1164,27 @@ async function rollbackMigration(src, opts = {}) {
   };
 }
 
+async function rollbackMigration(src, opts = {}) {
+  return withMigrationLock(src, () => rollbackMigrationUnlocked(src, opts));
+}
+
 function purgeExpiredBackups(nowMs) {
   const now = nowMs || Date.now();
   const state = loadState();
+  const backupPattern = /\.__ccbak_[0-9]{14}__$/i;
   const kept = [];
   const purged = [];
   for (const rec of state.records || []) {
     const exp = rec.expireAt ? new Date(rec.expireAt).getTime() : 0;
-    if (exp && exp <= now && rec.backupPath && fs.existsSync(rec.backupPath)) {
+    if (exp && exp <= now && rec.backupPath && backupPattern.test(rec.backupPath) && fs.existsSync(rec.backupPath)) {
       try {
         fs.rmSync(rec.backupPath, { recursive: true, force: true });
         purged.push({ ...rec, purged: true });
       } catch (e) {
         kept.push({ ...rec, purgeError: e.message });
       }
+    } else if (exp && exp <= now && rec.backupPath && !backupPattern.test(rec.backupPath)) {
+      kept.push({ ...rec, purgeSkipped: 'backup_path_format_mismatch' });
     } else if (exp && exp <= now) {
       purged.push({ ...rec, purged: true, alreadyGone: true });
     } else {

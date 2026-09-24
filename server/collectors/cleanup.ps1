@@ -71,7 +71,8 @@ function Test-PidReused($t, $proc) {
     }
   }
   if (-not $expectedMs -or -not $actualMs) {
-    return @{ reused = $false; verified = $false }
+    # Fail closed when PID identity cannot be verified.
+    return @{ reused = $true; verified = $false; verificationFailed = $true }
   }
   $diff = [math]::Abs($actualMs - $expectedMs)
   if ($diff -gt 2000) {
@@ -156,6 +157,12 @@ foreach ($t in $targets) {
   $entry.wsBefore = [int64]$proc.WorkingSet64
 
   $reuse = Test-PidReused $t $proc
+  if ($reuse.verificationFailed) {
+    $entry.error = 'start_time_unverified'
+    $entry.verified = $false
+    [void]$results.Add($entry)
+    continue
+  }
   if ($reuse.reused) {
     $entry.error = 'pid_reused_refused'
     $entry.verified = $true
