@@ -258,8 +258,9 @@ distributed. For the security-review evidence see sections 8–9 of
 | Item | Note |
 |---|---|
 | ≥24 hour loop stability test | **The only remaining acceptance item**; needs a long uninterrupted run, then a check of service liveness, memory curve and logs |
-| Orphaned migration backup (379.4 MB) | Awaiting your decision; its record was removed from the state file, so the program can no longer reach it |
-| Commit and push the current changes | Awaiting review; all verified, but per convention the assistant did not commit on your behalf |
+| Delete-performance optimisation (O3) | Observation: deletion costs ~1.5 s + ~48 ms per file, so a `%TEMP%`-scale directory takes minutes; repro script `_probe_delete_perf.js` |
+
+This round's changes are committed locally as `c39d95d` (not pushed; the remote is still at `16cc7a0`).
 
 ## Security Notes
 
