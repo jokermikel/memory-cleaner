@@ -157,6 +157,111 @@ function driveLetterOf(p) {
   return m ? m[1].toUpperCase() : null;
 }
 
+/**
+ * 占用抽样探测（缺陷 D6 修复，2026-09-24）。
+ *
+ * 背景：真机两次真实迁移（C:\Windows\Logs 被 WaaSMedic 占用、
+ * NVIDIA\DXCache 被驱动锁 EBUSY）都是**预检通过、复制阶段才失败** ——
+ * 用户已在界面确认过一次，却仍要等到复制失败才拿到错误。
+ *
+ * 设计约束（来自 D6 事项）：
+ *   ① 全量试读等于复制一遍，不可取 → **抽样 + 耗时上限**（复用 D1 的上限思路）；
+ *   ② 区分「整个目录不可读」（SOURCE_UNREADABLE）与「个别文件被锁」（SOURCE_LOCKED）；
+ *   ③ 结论标注「基于当前时刻的抽样」—— 占用随程序运行状态变化，不代表执行时刻。
+ *
+ * 探测方式：对抽样文件以**只读方式打开**（fs.openSync(p,'r') + close）。
+ * 持有方若以拒绝读共享的方式打开文件（驱动锁/日志独占），此调用即抛 EBUSY/EPERM。
+ * `openFile` 可注入 —— 单测里借此模拟真实环境难以稳定构造的文件锁。
+ */
+const PROBE_WALK_MS = 800;       // 抽样遍历耗时上限
+const PROBE_WALK_FILES = 1000;   // 抽样候选上限
+const PROBE_OPEN_MAX = 40;       // 实际试读文件数上限（最大 N 个 + 顺序前 N 个）
+const PROBE_OPEN_MS = 500;       // 试读阶段耗时上限
+
+function defaultOpenFile(p) {
+  const fd = fs.openSync(p, 'r');
+  fs.closeSync(fd);
+}
+
+function probeSourceLocked(root, opts = {}) {
+  const openFile = typeof opts.openFile === 'function' ? opts.openFile : defaultOpenFile;
+  const walkDeadline = Date.now() + (opts.walkMs != null ? opts.walkMs : PROBE_WALK_MS);
+  const walkCap = opts.walkFiles != null ? opts.walkFiles : PROBE_WALK_FILES;
+
+  const result = {
+    dirReadable: true,
+    sampled: 0,          // 实际试读的文件数
+    ok: 0,               // 试读成功的文件数
+    locked: [],          // [{path, error}]
+    candidates: 0,       // 遍历到的候选文件数
+    truncated: false,    // 候选收集是否因上限截断
+    at: new Date().toISOString(),
+    note: '基于当前时刻的抽样，占用状态可能随后续程序运行变化'
+  };
+
+  // ── 目录本身可读？（区分「整目录不可读」与「个别文件被锁」）──
+  try {
+    fs.readdirSync(root);
+  } catch (e) {
+    result.dirReadable = false;
+    return result;
+  }
+
+  // ── 收集候选（有界遍历）──
+  const candidates = [];
+  function walk(p) {
+    if (candidates.length >= walkCap || Date.now() > walkDeadline) {
+      result.truncated = true;
+      return;
+    }
+    let entries;
+    try { entries = fs.readdirSync(p, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of entries) {
+      if (candidates.length >= walkCap || Date.now() > walkDeadline) {
+        result.truncated = true;
+        return;
+      }
+      if (e.name === '.' || e.name === '..') continue;
+      const full = path.join(p, e.name);
+      let st;
+      try { st = fs.lstatSync(full); } catch (err) { continue; }
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) walk(full);
+      else if (st.isFile()) candidates.push({ path: full, size: st.size });
+    }
+  }
+  walk(root);
+  result.candidates = candidates.length;
+
+  // ── 抽样集：按大小降序取前 K + 遍历顺序前 K（大文件最可能被持有，且覆盖普通文件）──
+  const half = Math.ceil(PROBE_OPEN_MAX / 2);
+  const bySize = candidates.slice().sort((a, b) => b.size - a.size).slice(0, half);
+  const byOrder = candidates.slice(0, half);
+  const picked = [];
+  const seen = new Set();
+  for (const c of bySize.concat(byOrder)) {
+    if (seen.has(c.path)) continue;
+    seen.add(c.path);
+    picked.push(c);
+    if (picked.length >= PROBE_OPEN_MAX) break;
+  }
+
+  // ── 逐个只读试开（受耗时上限保护）──
+  const openDeadline = Date.now() + (opts.openMs != null ? opts.openMs : PROBE_OPEN_MS);
+  for (const c of picked) {
+    if (Date.now() > openDeadline) break;
+    result.sampled += 1;
+    try {
+      openFile(c.path);
+      result.ok += 1;
+    } catch (e) {
+      result.locked.push({ path: c.path, size: c.size, error: e.code || e.message || 'OPEN_FAILED' });
+    }
+  }
+  return result;
+}
+
+
 function driveFreeBytes(letter) {
   if (!letter) return 0;
   try {
@@ -451,6 +556,33 @@ function precheck(src, dest, opts = {}) {
     }
   }
 
+  // ── 阶段 3：占用抽样探测（缺陷 D6，2026-09-24）──
+  // 前两阶段都无阻断问题时，抽样试读源文件 —— 把「文件被占用导致复制失败」
+  // 从用户已确认之后提前到预检阶段暴露。有界：遍历/试读各有耗时与数量上限。
+  let probe = null;
+  if (issues.length === 0) {
+    probe = probeSourceLocked(source, opts.probe || {});
+    if (!probe.dirReadable) {
+      issues.push({
+        code: 'SOURCE_UNREADABLE',
+        message: '源目录本身无法读取（可能被独占占用或权限不足）。'
+          + '请检查该目录权限，或关闭独占打开它的程序后重试。',
+        path: source
+      });
+    } else if (probe.locked.length > 0) {
+      const shown = probe.locked.slice(0, 3).map(f => f.path).join('、');
+      const more = probe.locked.length > 3 ? ' 等 ' + probe.locked.length + ' 个文件' : '';
+      issues.push({
+        code: 'SOURCE_LOCKED',
+        message: '抽样发现 ' + probe.locked.length + ' 个文件被占用，无法读取：'
+          + shown + more + '。请先完全退出正在使用该缓存的程序（浏览器/游戏/驱动工具等），'
+          + '再重新预检。' + probe.note + '。',
+        path: source,
+        lockedFiles: probe.locked
+      });
+    }
+  }
+
   const occupiedHint = '请先关闭正在占用该目录的程序。若迁移中途遇到文件占用，会自动回滚，原数据不会丢。';
 
   return {
@@ -459,6 +591,7 @@ function precheck(src, dest, opts = {}) {
     destination,
     linkType,
     stats,
+    probe,
     destFreeBytes: free,
     destDrive,
     issues,
@@ -561,7 +694,9 @@ async function execute(opts = {}) {
     if (afterCopy.files !== check.stats.files || afterCopy.bytes !== check.stats.bytes) {
       throw fail('COPY_MISMATCH',
         '复制后校验失败：源 ' + check.stats.files + ' 个文件 / ' + check.stats.bytes +
-        ' 字节，目标 ' + afterCopy.files + ' 个文件 / ' + afterCopy.bytes + ' 字节');
+        ' 字节，目标 ' + afterCopy.files + ' 个文件 / ' + afterCopy.bytes + ' 字节。'
+        + '常见原因：复制期间有程序持续写入该目录，或个别文件被独占锁定。'
+        + '请关闭占用该缓存的程序后重新预检并重试（本次已自动回滚，原数据完好）。');
     }
 
     const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
@@ -621,6 +756,15 @@ async function execute(opts = {}) {
   } catch (e) {
     const notes = await rollback(rb);
     audit(`ROLLBACK ${check.source}: ${e.code || ''} ${e.message}; ${notes.join(',')}`);
+    // D6 补充：即便预检抽样通过，执行时刻仍可能遇到占用（占用状态随程序运行变化）。
+    // 把原始系统错误（EBUSY/EPERM）翻译成可操作建议，而不是只抛错误码。
+    if (e.code === 'EBUSY' || e.code === 'EPERM') {
+      throw fail('SOURCE_LOCKED',
+        '复制时遇到文件被占用（' + e.code + '）：' + String(e.message || '').slice(0, 200)
+        + '。请先完全退出正在使用该缓存的程序（浏览器/游戏/驱动工具等），然后重新预检并重试。'
+        + '本次已自动回滚，原数据完好。',
+        { rollback: notes });
+    }
     if (e.code) throw e;
     throw fail('MIGRATE_FAILED', '迁移失败并已回滚：' + e.message, { rollback: notes });
   }
@@ -789,6 +933,7 @@ module.exports = {
   purgeExpiredBackups,
   isCriticalPath,
   walkStats,
+  probeSourceLocked,
   isSubPath,
   DEFAULT_KEEP_DAYS
 };
