@@ -674,14 +674,36 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
       .then(st => { applyStatus(st); })
       .catch(() => { btn.hidden = true; });
 
-    async function waitForAdmin(timeoutMs){
+    /**
+     * 等待管理员服务就绪。
+     *
+     * 关键改进（2026-09-24，V5 实测发现）：
+     *   原先只按 90 秒超时硬等 —— 用户在 UAC 点「否」后服务不会重启，
+     *   页面就一直显示「正在请求提权…」，用户完全无法区分「点了否」与「还在等」，
+     *   实测被判定为「按钮卡死」。
+     *
+     *   现在利用一条可靠的信号：**点「是」时旧服务必然被杀死**，
+     *   期间 /api/privilege/status 会连不上（进入 catch）；
+     *   而点「否」时服务自始至终健康。
+     *   因此：若启动后若干秒内**从未观察到掉线**且也未变成管理员，即可判定用户取消了。
+     */
+    async function waitForAdmin(timeoutMs, onTick){
       const start = Date.now();
+      const CANCEL_PROBE_MS = 6000;   // 超过此时长仍未掉线 → 判定为已取消
+      let sawDowntime = false;
       while(Date.now() - start < timeoutMs){
         await new Promise(r => setTimeout(r, 800));
+        const elapsed = Date.now() - start;
         try {
           const st = await (await apiFetch('/api/privilege/status', { cache:'no-store' })).json();
           if(st && st.isAdmin) return st;
-        } catch(e) { /* 旧服务关掉、新服务还没起来，继续等 */ }
+        } catch(e) {
+          // 连不上 = 旧服务正在被替换（点「是」的正常过程）
+          sawDowntime = true;
+          if(onTick) onTick('restarting', elapsed);
+        }
+        if(!sawDowntime && elapsed >= CANCEL_PROBE_MS) return { __cancelled:true };
+        if(sawDowntime && onTick) onTick('restarting', elapsed);
       }
       return null;
     }
@@ -709,13 +731,22 @@ window.__CC_TOKEN__ = '__CC_TOKEN_VALUE__';
           return;
         }
         setMsg(r.message || '请在 UAC 窗口点击「是」，服务将以管理员身份重启。');
-        const st = await waitForAdmin(90000);
-        if(st){
+        const st = await waitForAdmin(40000, (phase, elapsed) => {
+          if(phase === 'restarting'){
+            setMsg('检测到服务正在重启，等待管理员服务就绪…（' + Math.round(elapsed / 1000) + 's）');
+          }
+        });
+        if(st && st.isAdmin){
           applyStatus(st);
           setMsg('提权成功，正在刷新数据…');
           setTimeout(() => location.reload(), 600);
+        } else if(st && st.__cancelled){
+          // 服务自始至终健康、从未重启 → 用户在 UAC 点了「否」
+          setMsg('未检测到提权请求 —— 你似乎取消了 UAC 确认，权限未改变。可随时重新点击尝试。', true);
+          btn.disabled = false;
+          btn.textContent = '🛡️ 提升权限';
         } else {
-          setMsg('未检测到管理员服务。若在 UAC 点了「否」，权限不会变化；点了「是」请稍候再刷新本页。', true);
+          setMsg('等待超时：未检测到管理员服务。若已点「是」，可能新服务启动较慢，请稍后刷新本页；若点了「否」，权限不会改变。', true);
           btn.disabled = false;
           btn.textContent = '🛡️ 提升权限';
         }
