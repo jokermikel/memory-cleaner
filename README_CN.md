@@ -2,6 +2,10 @@
 
 **简体中文** | [English](README.md)
 
+> **本文档是唯一事实来源（source of truth）**：改动先改这一份，再同步到英文对照版 [README.md](README.md)；
+> 两份内容不一致时以本文件为准。
+> 易变的发布状态（提交号、版本号）一律以 `git log` 为准，刻意不写进 README；逐版本变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 读电脑全部内存、按应用归组显示占用与用途、一键清理（带多重安全防护）。
 
 ---
@@ -35,6 +39,10 @@
 - **缓存搬走 + 目录链接**：把缓存复制到其他盘，原位置建 `mklink /J`（默认，无需管理员；可选 `/D` 符号链接）。程序仍写原路径，数据落在目标盘。失败自动回滚，原数据不丢。
 - **链接检查器**：判断路径是普通目录、junction、symlink 还是断链，并显示目标。`GET /api/disk/migrate/inspect`，命令行 `node disk-cli.js inspect <路径>`。
 - **内存条按本机条数显示**：现场读 `Win32_PhysicalMemory`；PowerShell 5.1 单条收成对象时也会收成数组，笔记本 1 条、台式机多条都能显示。
+
+### 长期档新增（2026-09-26）
+
+- **长任务进度与取消**：全盘扫描、磁盘清理计划与执行改为**后台异步任务**，界面显示进度百分比与当前步骤，并可随时「取消」——取消会连带结束底层 PowerShell 子进程，不会留下孤儿进程。同一任务已在飞时再点一次会明确提示「正在执行」（409 `TASK_BUSY`），不再出现「按钮点了没反应、也不知道跑了多久」。进度与取消接口见下方「接口一览」。
 
 ### 本次安全加固与一致性修复（2026-09-23）
 
@@ -93,7 +101,7 @@ node disk-cli.js migrate <源> <目标>     # 缓存迁移 dry-run（默认 mkli
 |---|---|
 | 0. HTTP 访问控制 | 服务启动生成一次性 64 位令牌并内嵌到首页；**写接口（`POST`）与一切非豁免的读接口**都必须携带 `X-CC-Token`（只有 `/api/health`、`/api/disk/volumes` 等毫秒级无副作用的接口免令牌），且 `Host` 必须是环回地址、跨源 `Origin` 一律拒绝、有请求体的写请求必须是 `application/json` |
 | 1. 默认 dry-run | 不传 `dryRun:false` 就只出计划，绝不动进程 |
-| 2. 保护进程拦截 | 选中系统关键进程直接拒绝，返回 HTTP 403 + 中文原因 |
+| 2. 保护进程拦截 | 选中系统关键进程直接拒绝，返回 HTTP 403 + 中文原因；强制结束会连带整棵子树，**子树里只要出现受保护进程就整体拒绝**（详见下方「树杀范围」） |
 | 3. 必须确认 | 真实执行必须传 `confirmed:true`，否则 HTTP 400 |
 | 4. PID 复用防护 | 执行前比对 PID + 启动时间，不一致则拒绝（防误杀刚启动的新进程） |
 | 5. 批量上限 | 一次超过 20 个进程，必须显式传 `acknowledgeBatchLimit:true`；`force` 只表示强制结束，不能用来放行批量 |
@@ -105,16 +113,32 @@ node disk-cli.js migrate <源> <目标>     # 缓存迁移 dry-run（默认 mkli
 
 **释放量真实性**：只有在进程确实退出后才上报释放量。如果没有任何进程被关闭，释放量报 0 并说明「系统内存差值为自然波动」——不拿波动冒充效果。释放量按**各成功进程的工作集**统计（而非整机内存前后差值），避免把其它进程的自然波动算成本次战果。
 
+**树杀范围（fail-closed）**：强制结束走的是 `taskkill /PID <pid> /T /F`，`/T` 会连带整棵子树，而被连带的子进程不会逐个查自身风险等级。为避免「点了一个安全的应用、顺手把树里的系统进程也结束了」，服务在动手前先枚举该目标的全部后代，逐个比对受保护影像名；**子树里只要出现一个受保护进程，就整体拒绝这一个目标**（`tree_contains_protected`）——不结束它的任何进程，也不做「跳过危险的那个、结束其它」的部分结束。同理，进程表读不出来、子树无法判定时一律按「无法核实」拒绝（`tree_check_failed`），与 PID 身份无法核实时的处理保持一致。受保护影像名有两处来源：`data/protectedProcesses.json` 的全量名单，以及本次快照里被判为 protected 的应用的进程名（有些分级只写在词典里，只看名单文件会漏）。该判定发生在前端「优雅关闭」之前，因此「拒绝」严格等于「这个目标一个进程都没动」。树杀闸门只在真正会用到 `/T` 的强制结束分支启用；纯优雅关闭不带 `/T`，不触发本闸门。
+
 ## 接口一览
 
-所有接口都需要在请求头带 `X-CC-Token`（令牌从首页 HTML 的 `window.__CC_TOKEN__` 读取），**例外是几个毫秒级、无副作用的接口**：`/api/health`、`/api/cleanup/io`、`/api/disk/volumes`、`/api/disk/migrate/{presets,inspect,records}`、`/api/privilege/status`。
+所有接口都需要在请求头带 `X-CC-Token`（令牌从首页 HTML 的 `window.__CC_TOKEN__` 读取），**例外是几个毫秒级、无副作用的接口**：`/api/health`、`/api/cleanup/io`、`/api/disk/volumes`、`/api/disk/migrate/records`、`/api/privilege/status`。以 `server/server.js` 的 `CHEAP_READ_PATHS` 为唯一准据；不在其中的一律需要令牌，读接口也不例外。
 
 为什么连读接口也要令牌：`/api/disk/snapshot` 与 `/api/disk/apps` 会做 30~60 秒的全盘扫描，若免令牌，任何网页用一个 `<img src="http://127.0.0.1:7788/api/disk/snapshot">` 就能反复触发（img 请求不带 `Origin`，来源校验挡不住，但它**一定带不上自定义请求头**）。`Host` / `Origin` 校验则对所有 `/api/*` 生效。
+
+**长任务一律异步执行**：全盘扫描、磁盘清理计划与执行这些要跑 robocopy / PowerShell 的活儿（单次 30~60 秒，删除可能更久），统一登记进 `lib/tasks.js` 的任务表后在后台跑——扫描期间事件循环不再被占住，其它请求照常响应（实测：在飞的盘扫描期间 `GET /api/health` 约 **2ms** 返回）。前端据此显示进度百分比与文案，并可「取消」；取消会把 `AbortSignal` 透传到底层 `execFile`，**连带结束正在跑的 PowerShell 子进程**。
+
+由此得到的传输契约（实现在 `server/routes/memory.js` 的 `TASK_ERROR_STATUS`，各接口不得自行解释）：
+
+| 情况 | 响应 |
+|---|---|
+| 同一个长任务已在飞（如扫描中再点扫描） | **409** `TASK_BUSY` |
+| 任务超时（各任务构造时给定 `timeoutMs`） | **504** `TASK_TIMEOUT` |
+| 请求在任务执行期间被取消 | **409** `TASK_CANCELLED` |
+| 取消一个已结束 / 从未运行的任务 | **409** `TASK_NOT_RUNNING` |
+| 查询未知的任务 id | **404** `TASK_NOT_FOUND` |
+
+响应形状刻意保持不变：成功仍是 200 + 原来的 JSON，前端与既有回归用例不需要区分「同步 / 异步」两种返回。
 
 | 接口 | 说明 |
 |---|---|
 | `GET /` | 界面（与服务同源，清理可用） |
-| `GET /api/health` | 健康检查（含 `isAdmin`） |
+| `GET /api/health` | 健康检查（含 `isAdmin`、`batchLimit`） |
 | `GET /api/memory/snapshot` | 完整快照（系统 + 应用 + 分级 + 守恒） |
 | `GET /api/memory/apps?risk=safe&q=抖音&limit=20` | 应用排行 |
 | `GET /api/memory/processes?q=chrome` | 进程明细 |
@@ -136,6 +160,9 @@ node disk-cli.js migrate <源> <目标>     # 缓存迁移 dry-run（默认 mkli
 | `POST /api/disk/migrate/execute` | 缓存搬走 + 建链接（默认 junction，需 confirmed=true） |
 | `GET /api/privilege/status` | 当前是否管理员、能否提权 |
 | `POST /api/privilege/elevate` | 弹出 UAC，以管理员身份重启服务（`dryRun:true` 只出计划） |
+| `GET /api/jobs` | 长任务进度：在飞任务（含 `percent` / `message` / `state`）+ 最近完成，另带 `running` 计数 |
+| `GET /api/jobs/:id` | 单个任务详情；未知 id 返回 404 `TASK_NOT_FOUND` |
+| `POST /api/jobs/:id/cancel` | 取消在飞长任务（202 + 任务快照）；已结束返回 409 `TASK_NOT_RUNNING` |
 
 ## 目录结构
 ```
@@ -143,6 +170,13 @@ node disk-cli.js migrate <源> <目标>     # 缓存迁移 dry-run（默认 mkli
 build.js                      采集数据并生成界面
 cli.js                        命令行排行
 内存清理助手.html            单文件界面（内嵌数据，双击可看）
+lib/
+  paths.js                   路径唯一来源（ROOT/DATA/HTML_FILE/collector/data 等锚点）
+  psRunner.js                PowerShell 调用唯一实现（同步/异步四函数 + 参数转义 + 输出清洗）
+  tasks.js                   长任务注册表（进度 / 取消 / 超时 / 单飞），见「接口一览」的传输契约
+  dictCache.js               词典 JSON 的 mtime 缓存
+  auditLog.js                审计日志写入
+  ports.js                   端口探测与 EADDRINUSE 处理
 server/
   server.js                   HTTP 服务（零依赖，同时提供界面和接口）
   routes/memory.js            RESTful 路由 + 参数校验 + 错误处理
@@ -154,14 +188,19 @@ server/
     workingSetService.js      工作集修剪（EmptyWorkingSet / SetProcessWorkingSetSize）
     diskIoGuard.js            磁盘忙碌闸门
     cacheMigrateService.js    缓存搬走 + 目录链接（默认 junction）
+    junkLocator.js            垃圾目录定位（按词典全量）
+    diskCleanupService.js     磁盘垃圾清理（白名单闸门 + 禁止路径校验）
   collectors/
     collect.ps1               内存采集脚本
     cleanup.ps1               进程清理脚本（含 PID 复用防护）
     trimWorkingSet.ps1        工作集修剪脚本（仅公开 API）
+    diskScan.ps1              磁盘占用扫描（robocopy 量大小）
     processList.js            合并双数据源
     systemMemory.js           整机内存/内存条结构化
+    diskSpace.js              磁盘枚举 + 占用快照（服务端）／命令行共用
 data/
   appDict.zh.json             中文用途词典（70+ 条）
+  junkDict.zh.json            垃圾路径词典（**唯一来源**：快照与清理都取自这里）
   protectedProcesses.json     禁止结束名单（18 个系统关键进程）
   snapshot.json               最近一次采集快照
 logs/                         审计日志
@@ -171,11 +210,13 @@ logs/                         审计日志
 
 1. **主口径用 `Get-Process.WorkingSet64`**：实测同一时刻 CIM 的 `WorkingSetSize` 合计比真实已用偏大 1GB 以上，只有 WorkingSet64 对齐任务管理器。
 2. **归组守恒是硬约束**：归组后应用内存合计必须严格等于归组前进程合计，否则就是有进程被丢了。
-3. **用途绝不编造**：词典条目基于已在 Windows 上验证存在的常见路径，或 `Win32_Service` 服务表反查；查不到显示「未收录」。词典**不预置任何机器相关的数值**——大小一律由实时扫描给出，`note` 只写量级参考与操作提醒。
+3. **用途绝不编造**：词典条目基于已在 Windows 上验证存在的常见路径；查不到显示「未收录」。词典**不预置任何机器相关的数值**——大小一律由实时扫描给出，`note` 只写量级参考与操作提醒。
 4. **清理先优雅后强制**：先发关闭消息（等同点 ×，让程序自己保存），失败才强制结束。
 5. **实测注意事项**：Windows 服务进程（如 `MSPCManagerService`）在普通权限下杀不掉，会返回「拒绝访问」——这是权限机制，需要以管理员身份运行。
 6. **清内存只用公开 API**：结束进程或修剪工作集；绝不强制清空系统待机/修改页列表。
 7. **缓存优先搬走而不是删除**：删除后程序会重建，占回 C 盘；搬走 + junction 后空间才是永久的。
+8. **同一事实只留一处**：垃圾路径的唯一来源是 `data/junkDict.zh.json`，磁盘占用快照与磁盘清理都从它取；驱动器枚举只在 `diskSpace.listLocalDrives()` 实现一次（带进程内缓存）。快照只量算其中**一小部分条目**（`SNAPSHOT_JUNK_ENTRY_IDS`，每条要跑一次 robocopy），明细清单仍走词典全量——这是刻意的性能取舍，不是漏算。
+9. **长任务不占事件循环**：走 PowerShell 的活儿一律异步执行并登记进任务表，扫描/删除期间服务仍能响应其它请求；同一任务只允许一个在飞，重复触发得到 409 而不是排队堆积。
 
 ## 提升权限
 
@@ -203,21 +244,28 @@ logs/                         审计日志
 - **动态盘符枚举**：磁盘模块通过 `Win32_LogicalDisk (DriveType=3)` 枚举本机所有本地固定磁盘（单 C 盘、C+D、C+D+E 均可），系统盘用 `%SystemDrive%` 求取，非系统盘自动识别为数据盘。
 - **用户路径展开**：映射表与词典里的 `%LOCALAPPDATA%` / `%APPDATA%` / `%USERPROFILE%` / `%TEMP%` 在运行时展开为当前登录用户的真实路径，不再写死具体用户名。
 - **回收站按盘符注入**：回收站条目（`id` 以 `recycle` 开头）在扫描时按本机所有本地盘符动态生成 `$Recycle.Bin` 路径。
+- **剩余空间对比覆盖全部固定盘**：清理前后的剩余空间按本机全部本地固定盘聚合，`systemDeltaBytes` 因此也包含 E:/F: 等盘的变化（原先只读 C: 与 D: 两个盘符）。
 - **无 D 盘降级**：只有系统盘时，数据盘列表为空，扫描循环安全跳过，应用仍能正常出系统盘的磁盘占用与垃圾清单。
 - **内存条按本机条数显示**：物理内存来自 `Win32_PhysicalMemory`，容量/厂商/插槽/频率/代数都是这台电脑现场读的，不写死。PowerShell 5.1 在只有 1 条内存时会把数组收成对象，采集脚本和 Node 侧都强制收成数组，笔记本单条、台式机多条都能显示。
 
 ## 测试
 
-测试脚手架（`server/services/__tests__/`）只在维护者本地运行，**不随仓库分发**——它含本机路径、进程名等环境细节。
-以下是测试结论；完整明细见仓库根目录的 **`最终测试报告.md`**。
-
-维护者本地复跑（**本机需带 IO 转接层**，否则会因执行通道限制出现 `spawnSync ... EBUSY` 假失败）：
+仓库自带一套**脱敏、基于夹具**的单元测试子集（`server/services/__tests__/`）：只依赖 `%TEMP%` 沙箱与系统 PowerShell，不含本机绝对路径、用户名与私有目录，可在任意 Windows 机器上复跑，并接入了 GitHub Actions（Windows runner）。
 
 ```bash
-NODE_OPTIONS="--require=<项目根>/_shim_childio.js" node --test server/services/__tests__/*.test.js
+npm test          # 等价于 node --test "server/services/__tests__/*.test.js"
 ```
 
-Node 24 必须带 `*.test.js`，只传目录会失败。
+Node 24 必须带 `*.test.js` 通配符，只传目录会失败。
+
+端到端运行器（`tests/run-tests.js` + `tests/regenerate-baseline.js` + `tests/fixture.js`）也已随仓库分发：三者只依赖 `%TEMP%` 沙箱与系统 PowerShell，路径全部以 `__dirname` 为锚点（与工作目录解耦），含本机源码哈希的 `tests/baseline.json` 与运行产物仍被 `.gitignore` 排除。首次复跑需先生成本地基线：
+
+```bash
+node tests\regenerate-baseline.js   # 生成本机基线（含本机源码哈希，不进仓库）
+node tests\run-tests.js             # 全量端到端（只打 %TEMP% 沙箱，自建 7799 端口）
+```
+
+定向验证脚本与探针（`_*.js`、`_*_results.json`）统一收纳在 `tools\` 下，仍只在本机运行、不随仓库分发（`.gitignore` 的 `_*` 模式无前导斜杠，在任意层级都生效）。以下是测试结论；完整明细见与本文档同目录的 `最终测试报告.md`（历史过程记录，数字不回填）。
 
 ### 已完成
 
@@ -230,9 +278,10 @@ Node 24 必须带 `*.test.js`，只传目录会失败。
 | 新增：批量上限独立闸门、磁盘禁止路径全盘符、垃圾扫描盘符动态化、PID 复用回退、释放量进程级口径 | 12/12 通过 |
 | 新增：词典不写死本机值、CLI 与服务端垃圾清单同源、死代码清除 | 4/4 通过 |
 | 新增：预置缓存目录筛选 | H1~H6 检查；真实接口实测 20 条中 15 条可迁移、5 条禁用并说明原因；约 2 秒 |
-| **最新单元测试** | **133/133 通过**（17 套件，2026-09-24） |
-| **最新定向 HTTP 测试** | **60/60 通过**（2026-09-24） |
-| **最新端到端测试** | **165/165 通过**（T0~T13，2026-09-24；585.4 秒） |
+| **最新单元测试** | **203/203 通过**（25 套件，2026-09-26；`npm test`，Node 24.18） |
+| **最新定向 HTTP 测试** | **71/71 通过**（2026-09-26；`node tools\_verify_http_gate.js`，含长任务 J1~J11 段） |
+| **最新端到端测试** | **174/174 通过**（T0~T13，2026-09-26；367.9 秒，从仓库根执行 `node tests\run-tests.js`） |
+| **删除性能实测** | 拟合 **固定 373ms + 0.4ms/文件**（1~2000 文件）；删除期间**事件循环最大延迟 14ms**；探针 `tools\_probe_delete_perf.js` |
 | **真实环境验证** | 受控真实缓存迁移+回滚 **29/29**（Edge 缓存 1302 文件 / 367MB，逐文件 SHA256 复原一致）· 真实用户目录删除+完整复原 **23/23** · 界面点击验收 **18/18** |
 
 其中安全复审 M-01 ~ M-08（链接删除防护、迁移串行锁与原子写、PID 校验 fail-closed、
@@ -240,25 +289,24 @@ Node 24 必须带 `*.test.js`，只传目录会失败。
 自检用例见 `server/services/__tests__/securityRegression.test.js`（6 例）。
 真实环境验证另发现并修复 2 个界面缺陷（撤销记录选择空值陷阱、清空后提示不同步）。
 
-测试脚手架仅维护者本地运行，不随仓库分发。以上数字来自 `tests/test-results.json` 与 `tests/e2e-run.log`；
-安全复审结论与证据见 `项目安全与质量复审报告_20260924_修正版.md` 第八、九节。
+单元测试数字来自 `npm test`（可在本仓库复跑）；端到端数字来自 `tests/test-results.json`，定向 HTTP 数字来自 `tools\_verify_http_gate.js` 的输出——两者都是本机运行产物，不随仓库分发。
+安全复审结论与证据见同目录的 `项目安全与质量复审报告_20260924_修正版.md`——该报告含本机现场细节，只保留在维护者本机，不随仓库分发。
 
 ### 尚待人工完成
 
 | 项 | 状态 |
 |---|---|
-| ≥24 小时循环稳定性测试 | **唯一未完成的验收项**；需持续运行并检查服务存活、内存曲线和日志 |
-| 删除性能优化（O3） | 观察项：删除耗时约 1.5 秒 + 48ms/文件，`%TEMP%` 量级为分钟级；复现脚本 `_probe_delete_perf.js` |
+| ≥24 小时循环稳定性测试 | **未完成**（立项时的红线项）；前置条件（异步任务模型）已落地，需持续运行并检查服务存活、内存曲线、`GET /api/jobs` 的 `running` 计数与日志 |
+| 真实断链 symlink 的检查器分支 | 链接检查器已能区分普通目录 / junction / symlink / 断链，但断链分支未在真机造链验证 |
+| 读屏实测（Narrator / NVDA） | 可访问性只做了静态实现与断言，未用真实屏幕阅读器走一遍 |
 
-本轮改动已提交为本地提交 `c39d95d`（未推送，远端仍为 `16cc7a0`）。
-
-| 推送最新提交 | 本地 `main` 领先远端 2 个提交；需网络/代理恢复后再推送 |
+本轮改动与发布状态一律以 `git log` 为准，本文档刻意不写具体提交号。
 
 ## 安全说明
 
 - 运行时快照 `data/snapshot.json` 与生成界面 `内存清理助手.html` 含本机真实进程清单与用户名，已由 `.gitignore` 排除，**不会上传到仓库**。
 - 审计日志（`logs/`、`*.log`）与带时间戳的工具备份（`*.2026-*-*Z`）同样排除。
-- 单元测试脚手架（`server/services/__tests__/`）含本机路径与进程名等环境细节，已由 `.gitignore` 排除，不随仓库分发。
+- 单元测试子集（`server/services/__tests__/`）已**脱敏后随仓库分发**：只依赖 `%TEMP%` 沙箱与系统 PowerShell，不含本机绝对路径、用户名与私有目录，可在任意 Windows 机器上 `npm test` 复跑。反过来，端到端运行器（`tests/`）、根目录定向脚本（`_*.js`）与 `baseline.json` 含本机路径与进程清单，仍由 `.gitignore` 排除。
 - 本项目零依赖、无项目密钥；服务仅监听 `127.0.0.1`，不对外暴露。访问控制见上文「九道安全闸门」第 0 道。
 
 ## 常见问题
@@ -295,12 +343,12 @@ Node 24 必须带 `*.test.js`，只传目录会失败。
    （例如 `force` 不能用来放行批量、释放量不能用整机内存差值统计）。
 2. 不要提交运行时产物 —— `data/snapshot.json`、`内存清理助手.html`、`logs/`、`*.log`
    已被 `.gitignore` 排除，请勿 `git add -f`。
-3. 改动后跑一遍本地测试：`node --test server/services/__tests__/*.test.js`
-   （Node 24 必须带 `*.test.js`，只传目录会失败）。
+3. 改动后跑一遍测试：`npm test`（等价于 `node --test "server/services/__tests__/*.test.js"`，
+   Node 24 必须带 `*.test.js` 通配符，只传目录会失败）；提交前可跑 `npm run verify`
+   （四个入口文件的 `node --check` + 单元测试）。CI 在 Windows runner 上跑的就是 `npm test`。
 4. 界面改动请同步改 `_template.html`，再跑 `node build.js` 重新生成单文件界面 ——
    直接改 `内存清理助手.html` 会在下次 build 时被覆盖。
 
 ## 许可证
 
-本项目**尚未附带 LICENSE 文件，许可证未指定**。如需使用、修改或分发，请先与作者确认。
-（作者后续如需开源，可直接在仓库根目录添加 `LICENSE` 文件。）
+MIT，详见 [LICENSE](LICENSE)。本软件按「原样」提供，不附带任何形式的担保：本工具会结束进程、删除文件，请自行承担使用风险。

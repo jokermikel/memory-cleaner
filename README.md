@@ -2,6 +2,10 @@
 
 [简体中文](README_CN.md) | **English**
 
+> **This file is a translation kept in sync with [README_CN.md](README_CN.md), which is the single source of truth.**
+> Change the Chinese version first, then mirror it here; if the two ever disagree, README_CN.md wins.
+> Release state (commit hashes, version numbers) lives in `git log`, deliberately not in the README; per-version changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+
 Read your machine's full memory usage, group it by application with purpose labels, and clean up in one click (guarded by multiple safety mechanisms).
 
 ---
@@ -36,6 +40,10 @@ Technically it is **zero-dependency** — the backend uses only Node.js built-in
 - **Cache relocate + directory junction**: copy a cache to another drive and put `mklink /J` back at the original path (default; no admin required; `/D` symlink optional). Programs keep writing to the original path while the data lands on the target drive. Failures roll back automatically — no data loss.
 - **Link inspector**: tells whether a path is a normal directory, junction, symlink, or broken link, and shows its target. `GET /api/disk/migrate/inspect`, CLI: `node disk-cli.js inspect <path>`.
 - **RAM modules shown per machine**: reads `Win32_PhysicalMemory` live. PowerShell 5.1 collapses a single result into an object, so the collector always wraps it into an array — works for laptops (1 module) and desktops (several).
+
+### Long-term Batch (2026-09-26)
+
+- **Progress and cancellation for long tasks**: full-drive scans, disk cleanup plans and cleanup execution now run as **background async tasks**. The UI shows a percentage and the current step, and you can cancel at any time — cancelling also terminates the underlying PowerShell child process, so no orphans are left behind. Triggering the same task again while it is in flight now says so explicitly (409 `TASK_BUSY`), instead of "clicked the button and nothing happened, with no idea how long it had been running". See the API overview below for the progress and cancel endpoints.
 
 ### Security Hardening & Consistency Fixes (2026-09-23)
 
@@ -97,7 +105,7 @@ After cleanup a **before / after comparison** is shown: before → after, how mu
 |---|---|
 | 0. HTTP access control | A one-time 64-char token is generated at startup and embedded in the homepage; **write endpoints (`POST`) and every non-exempt read endpoint** must carry `X-CC-Token` (only millisecond-level side-effect-free endpoints such as `/api/health` and `/api/disk/volumes` are exempt). `Host` must be loopback, cross-origin `Origin` is rejected, and write request bodies must be `application/json` |
 | 1. Default dry-run | Without `dryRun:false` it only produces a plan and never touches a process |
-| 2. Protected-process blocking | Selecting a critical system process is rejected with HTTP 403 and a Chinese reason |
+| 2. Protected-process blocking | Selecting a critical system process is rejected with HTTP 403 and a Chinese reason; a force-kill also takes down the whole process tree, so **if any protected process appears anywhere in that tree the whole operation is rejected** (see "Tree-kill scope" below) |
 | 3. Confirmation required | Real execution requires `confirmed:true`, otherwise HTTP 400 |
 | 4. PID-reuse protection | PID + start time are compared before execution; a mismatch is rejected (prevents killing a newly started process that reused the PID) |
 | 5. Batch limit | More than 20 processes in one run requires an explicit `acknowledgeBatchLimit:true`; `force` only means force-kill and cannot be used to allow a batch |
@@ -109,16 +117,32 @@ After cleanup a **before / after comparison** is shown: before → after, how mu
 
 **Freed-memory honesty**: freed memory is reported only after a process actually exits. If nothing was closed, it reports 0 and explains that the system memory delta is just natural fluctuation — it never passes noise off as results. The figure is counted from **the working set of each successful process** (not from the whole-machine memory delta), so other processes' natural fluctuation is not counted as this run's gain.
 
+**Tree-kill scope (fail-closed)**: force-kill uses `taskkill /PID <pid> /T /F`, and `/T` takes down the whole descendant tree — the descendants dragged along never have their own risk grade consulted. So that "I ticked one safe app and a critical system process went down with its tree" cannot happen, the service enumerates every descendant of the target before acting and checks each one against the protected image names. **If even a single protected process appears in that tree, the whole target is rejected** (`tree_contains_protected`): none of its processes are ended, and there is no partial "skip the dangerous one, kill the rest". Likewise, if the process table cannot be read and the tree cannot be established, it is rejected as unverifiable (`tree_check_failed`) — the same fail-closed stance used when PID identity cannot be verified. Protected image names come from two sources: the full list in `data/protectedProcesses.json`, plus the process names of every app graded `protected` in the current snapshot (some grades live only in the dictionary, so the list file alone would miss them). The check runs *before* the graceful close, so "rejected" strictly means not one process of that target was touched. The tree guard is only armed in the force-kill branch that actually uses `/T`; a plain graceful close carries no `/T` and does not trigger it.
+
 ## API Overview
 
-All endpoints require the `X-CC-Token` request header (the token is read from `window.__CC_TOKEN__` in the homepage HTML). **Exceptions are a few millisecond-level, side-effect-free endpoints**: `/api/health`, `/api/cleanup/io`, `/api/disk/volumes`, `/api/disk/migrate/{presets,inspect,records}`, `/api/privilege/status`.
+All endpoints require the `X-CC-Token` request header (the token is read from `window.__CC_TOKEN__` in the homepage HTML). **Exceptions are a few millisecond-level, side-effect-free endpoints**: `/api/health`, `/api/cleanup/io`, `/api/disk/volumes`, `/api/disk/migrate/records`, `/api/privilege/status`. The authoritative list is `CHEAP_READ_PATHS` in `server/server.js`; anything not in it requires a token, including read endpoints.
 
 Why even read endpoints need a token: `/api/disk/snapshot` and `/api/disk/apps` perform a 30~60 second full-drive scan. Without a token, any web page could trigger them repeatedly with a single `<img src="http://127.0.0.1:7788/api/disk/snapshot">` — an `img` request carries no `Origin`, so origin checks cannot stop it, but it **can never carry a custom request header**. The `Host` / `Origin` checks apply to all `/api/*`.
+
+**Long tasks always run asynchronously**: anything that drives robocopy / PowerShell — full-drive scans, disk cleanup plans and executions (30~60 s each, deletions possibly longer) — is registered in the task table in `lib/tasks.js` and runs in the background. The event loop is no longer blocked while scanning, so other requests are answered normally (measured: `GET /api/health` returns in about **2 ms** while a drive scan is in flight). The UI shows progress and lets you cancel; cancelling propagates the `AbortSignal` down to `execFile` and **terminates the running PowerShell child process**.
+
+That yields the following transport contract (implemented in `TASK_ERROR_STATUS` in `server/routes/memory.js`; call sites must not interpret the codes themselves):
+
+| Situation | Response |
+|---|---|
+| The same long task is already in flight (e.g. pressing scan again) | **409** `TASK_BUSY` |
+| Task timed out (each task is constructed with a `timeoutMs`) | **504** `TASK_TIMEOUT` |
+| The request was cancelled while the task was running | **409** `TASK_CANCELLED` |
+| Cancelling a finished / never-started task | **409** `TASK_NOT_RUNNING` |
+| Querying an unknown task id | **404** `TASK_NOT_FOUND` |
+
+The response shape is deliberately unchanged: success is still 200 + the original JSON, so neither the front end nor the existing regression tests have to distinguish synchronous from asynchronous returns.
 
 | Endpoint | Description |
 |---|---|
 | `GET /` | UI (same origin as the service; cleanup works) |
-| `GET /api/health` | Health check (includes `isAdmin`) |
+| `GET /api/health` | Health check (includes `isAdmin`, `batchLimit`) |
 | `GET /api/memory/snapshot` | Full snapshot (system + apps + rating + conservation) |
 | `GET /api/memory/apps?risk=safe&q=抖音&limit=20` | App ranking |
 | `GET /api/memory/processes?q=chrome` | Process details |
@@ -140,6 +164,9 @@ Why even read endpoints need a token: `/api/disk/snapshot` and `/api/disk/apps` 
 | `POST /api/disk/migrate/execute` | Relocate cache + create link (junction by default, requires confirmed=true) |
 | `GET /api/privilege/status` | Whether you are admin and can elevate |
 | `POST /api/privilege/elevate` | Raise UAC and restart the service as admin (`dryRun:true` only returns the plan) |
+| `GET /api/jobs` | Long-task progress: in-flight tasks (`percent` / `message` / `state`) + recently finished, plus a `running` count |
+| `GET /api/jobs/:id` | One task's progress snapshot; unknown id returns 404 `TASK_NOT_FOUND` |
+| `POST /api/jobs/:id/cancel` | Cancel an in-flight long task (202 + task snapshot); finished tasks return 409 `TASK_NOT_RUNNING` |
 
 ## Project Structure
 
@@ -148,6 +175,13 @@ Why even read endpoints need a token: `/api/disk/snapshot` and `/api/disk/apps` 
 build.js                      Collect data and generate the UI
 cli.js                        Command-line ranking
 内存清理助手.html            Single-file UI (data embedded, double-click to view)
+lib/
+  paths.js                    Single source of path anchors (ROOT / DATA / HTML_FILE / collector / data ...)
+  psRunner.js                 The one implementation of PowerShell invocation (4 sync/async helpers + arg escaping + output cleaning)
+  tasks.js                    Long-task registry (progress / cancel / timeout / single-flight); see the transport contract above
+  dictCache.js                mtime-based JSON dictionary cache
+  auditLog.js                 Audit-log writing
+  ports.js                    Port probing and EADDRINUSE handling
 server/
   server.js                   HTTP service (zero-dependency; serves both UI and API)
   routes/memory.js            RESTful routes + parameter validation + error handling
@@ -159,14 +193,19 @@ server/
     workingSetService.js      Working-set trimming (EmptyWorkingSet / SetProcessWorkingSetSize)
     diskIoGuard.js            Busy-disk gate
     cacheMigrateService.js    Cache relocation + directory link (junction by default)
+    junkLocator.js            Junk-directory location (full dictionary)
+    diskCleanupService.js     Disk junk cleanup (allowlist gate + forbidden-path checks)
   collectors/
     collect.ps1               Memory collection script
     cleanup.ps1               Process cleanup script (with PID-reuse protection)
     trimWorkingSet.ps1        Working-set trim script (public APIs only)
+    diskScan.ps1              Disk-usage scan (sizes via robocopy)
     processList.js            Merges two data sources
     systemMemory.js           Machine memory / RAM module structuring
+    diskSpace.js              Drive enumeration + usage snapshot (server and CLI share it)
 data/
   appDict.zh.json             Chinese purpose dictionary (70+ entries)
+  junkDict.zh.json            Junk-path dictionary (**single source**: both snapshot and cleanup read it)
   protectedProcesses.json     Never-terminate list (18 critical system processes)
   snapshot.json               Most recent collection snapshot
 logs/                         Audit logs
@@ -176,11 +215,13 @@ logs/                         Audit logs
 
 1. **`Get-Process.WorkingSet64` is the primary metric**: measured at the same instant, CIM's `WorkingSetSize` total runs more than 1GB above real usage; only `WorkingSet64` matches Task Manager.
 2. **Grouping conservation is a hard constraint**: total app memory after grouping must exactly equal total process memory before grouping — otherwise a process was dropped.
-3. **Purposes are never invented**: dictionary entries are based on common paths verified to exist on Windows, or reverse lookups against the `Win32_Service` table; anything unknown shows "not catalogued". The dictionary **presets no machine-specific numbers** — sizes always come from a live scan, and `note` only carries magnitude hints and handling reminders.
+3. **Purposes are never invented**: dictionary entries are based on common paths verified to exist on Windows; anything unknown shows "not catalogued". The dictionary **presets no machine-specific numbers** — sizes always come from a live scan, and `note` only carries magnitude hints and handling reminders.
 4. **Cleanup is graceful first, forced second**: a close message is sent first (equivalent to clicking ×, letting the program save), and only failure escalates to forced termination.
 5. **A note from real testing**: Windows service processes (such as `MSPCManagerService`) cannot be killed under normal privileges and return "access denied" — that is the permission model, and it needs administrator rights.
 6. **Only public APIs for freeing memory**: terminate processes or trim working sets; never force-flush the system standby / modified page lists.
 7. **Prefer relocating caches over deleting them**: deleted caches get rebuilt and reclaim C:; relocate + junction frees the space permanently.
+8. **One fact lives in exactly one place**: the single source of junk paths is `data/junkDict.zh.json`, and both the disk-usage snapshot and disk cleanup read from it; drive enumeration is implemented once in `diskSpace.listLocalDrives()` (with an in-process cache). The snapshot only sizes **a small subset of entries** (`SNAPSHOT_JUNK_ENTRY_IDS`, since each one costs a robocopy run), while the detailed list still comes from the full dictionary — a deliberate performance trade-off, not an omission.
+9. **Long tasks never occupy the event loop**: any work that drives PowerShell runs asynchronously and is registered in the task table, so the service keeps answering other requests while scanning or deleting; only one instance of a given task may be in flight, so a repeated trigger gets 409 instead of piling up in a queue.
 
 ## Privilege Elevation
 
@@ -209,22 +250,28 @@ The app assumes no username and hardcodes no drive letter — it runs fully on a
 - **Dynamic drive enumeration**: the disk module enumerates all local fixed disks via `Win32_LogicalDisk (DriveType=3)` (single C, C+D, C+D+E all work). The system drive comes from `%SystemDrive%`, and non-system drives are treated as data drives.
 - **User path expansion**: `%LOCALAPPDATA%` / `%APPDATA%` / `%USERPROFILE%` / `%TEMP%` in the mapping table and dictionaries expand to the current logged-in user's real paths at runtime — no username is hardcoded.
 - **Recycle bin injected per drive**: recycle-bin entries (ids starting with `recycle`) generate `$Recycle.Bin` paths for every local drive at scan time.
+- **Free-space comparison covers every fixed drive**: cleanup before/after free space is aggregated over all local fixed drives from the same enumeration, so the reported `systemDeltaBytes` includes E:/F: as well (previously only C: and D: were read).
 - **Degrades with no D: drive**: with only a system drive, the data-drive list is empty and the scan loop skips safely; the app still reports system-drive usage and junk.
 - **RAM modules shown per machine**: physical memory comes from `Win32_PhysicalMemory`; capacity / vendor / slot / speed / generation are read live from this machine, never hardcoded. PowerShell 5.1 collapses a single module into an object, so both the collector script and the Node side force it into an array — laptops with one module and desktops with several both display correctly.
 
 ## Testing
 
-The test scaffolding (`server/services/__tests__/`) runs on the maintainer's machine only and is **not distributed with the repo** — it contains machine-specific paths and process names.
-Below are the test results; full details are in **`最终测试报告.md`** at the repo root.
-
-To rerun locally as the maintainer (**the I/O shim is required on this machine**, otherwise the
-execution channel produces `spawnSync ... EBUSY` false failures):
+The repo ships a **desensitised, fixture-based** unit-test subset (`server/services/__tests__/`): it only depends on a `%TEMP%` sandbox and the system PowerShell, contains no machine-specific absolute paths, usernames or private directories, runs on any Windows machine, and is wired into GitHub Actions (Windows runner).
 
 ```bash
-NODE_OPTIONS="--require=<repo-root>/_shim_childio.js" node --test server/services/__tests__/*.test.js
+npm test          # same as: node --test "server/services/__tests__/*.test.js"
 ```
 
 Node 24 requires the `*.test.js` glob; passing just the directory fails.
+
+The end-to-end runner (`tests/run-tests.js` + `tests/regenerate-baseline.js` + `tests/fixture.js`) is distributed too: all three only depend on a `%TEMP%` sandbox and the system PowerShell, every path is anchored on `__dirname` (independent of the working directory), and `tests/baseline.json` (which carries machine-specific source hashes) plus the run artefacts stay excluded by `.gitignore`. Generate a local baseline first:
+
+```bash
+node tests\regenerate-baseline.js   # build the local baseline (machine-specific hashes, never committed)
+node tests\run-tests.js             # full end-to-end (touches only the %TEMP% sandbox, spins up port 7799)
+```
+
+The targeted verification scripts and probes (`_*.js`, `_*_results.json`) now live under `tools\` and still run on the maintainer's machine only, not distributed (the `_*` patterns in `.gitignore` have no leading slash, so they apply at any depth). Below are the test results; full details are in `最终测试报告.md`, kept alongside this README (a historical record — its numbers are not back-filled).
 
 ### Completed
 
@@ -237,9 +284,10 @@ Node 24 requires the `*.test.js` glob; passing just the directory fails.
 | Added: standalone batch-limit gate, forbidden paths for all drives, dynamic junk-scan drive letter, PID-reuse fallback, per-process freed-memory accounting | 12/12 passed |
 | Added: dictionary free of machine-specific values, CLI and server sharing one junk list, dead code removal | 4/4 passed |
 | Added: preset cache-directory assessment | H1–H6 checks; live API run: 15 of 20 relocatable, 5 disabled with reasons; ~2 s |
-| **Latest unit tests** | **133/133 passed** (17 suites, 2026-09-24) |
-| **Latest targeted HTTP tests** | **60/60 passed** (2026-09-24) |
-| **Latest end-to-end tests** | **165/165 passed** (T0–T13, 2026-09-24; 585.4 s) |
+| **Latest unit tests** | **203/203 passed** (25 suites, 2026-09-26; `npm test`, Node 24.18) |
+| **Latest targeted HTTP tests** | **71/71 passed** (2026-09-26; `node tools\_verify_http_gate.js`, including the long-task section J1–J11) |
+| **Latest end-to-end tests** | **174/174 passed** (T0–T13, 2026-09-26; 367.9 s, run from the repo root via `node tests\run-tests.js`) |
+| **Delete-performance benchmark** | Fit: **fixed 373 ms + 0.4 ms per file** (1–2000 files); **max event-loop lag 14 ms** during deletion; probe `tools\_probe_delete_perf.js` |
 | **Real-environment verification** | Controlled real cache relocation + rollback **29/29** (Edge cache, 1302 files / 367 MB, byte-identical per-file SHA256 restore) · Real user-directory deletion + full restore **23/23** · UI click acceptance **18/18** |
 
 The security-review items M-01 – M-08 (reparse-point protection on delete, migration serialization +
@@ -249,24 +297,24 @@ handling) are all fixed and closed; the self-check cases live in
 `server/services/__tests__/securityRegression.test.js` (6 cases). The real-environment pass also found
 and fixed 2 UI defects (empty rollback-selection resolving to record #0; stale hint text after clearing).
 
-End-to-end numbers come from `tests/test-results.json`; the scaffolding runs locally only and is not
-distributed. For the security-review evidence see sections 8–9 of
-`项目安全与质量复审报告_20260924_修正版.md`.
+Unit-test numbers come from `npm test` (reproducible from this repo); end-to-end numbers come from `tests/test-results.json` and targeted-HTTP numbers from the `tools\_verify_http_gate.js` output — both are machine-local run artefacts and are not distributed.
+For the security-review evidence, see `项目安全与质量复审报告_20260924_修正版.md` alongside this README — it contains machine-local detail and stays on the maintainer's machine, not distributed.
 
 ### Still To Do (Manual, On Real Machines)
 
 | Item | Note |
 |---|---|
-| ≥24 hour loop stability test | **The only remaining acceptance item**; needs a long uninterrupted run, then a check of service liveness, memory curve and logs |
-| Delete-performance optimisation (O3) | Observation: deletion costs ~1.5 s + ~48 ms per file, so a `%TEMP%`-scale directory takes minutes; repro script `_probe_delete_perf.js` |
+| ≥24 hour loop stability test | **Not done** (the red line from project kickoff); the prerequisite (async task model) has landed, so it needs a long uninterrupted run, then a check of service liveness, memory curve, the `running` count from `GET /api/jobs`, and the logs |
+| Broken-symlink branch of the link inspector | The inspector already distinguishes normal dir / junction / symlink / broken link, but the broken-link branch has not been verified with a hand-made link |
+| Screen-reader pass (Narrator / NVDA) | Accessibility has a static implementation and assertions only; no real screen reader has been walked through it |
 
-This round's changes are committed locally as `c39d95d` (not pushed; the remote is still at `16cc7a0`).
+Commit history and release state are tracked by git (`git log`), not by this document — commit hashes are deliberately not written here.
 
 ## Security Notes
 
 - The runtime snapshot `data/snapshot.json` and the generated UI `内存清理助手.html` contain this machine's real process list and username. Both are excluded by `.gitignore` and are **never uploaded**.
 - Audit logs (`logs/`, `*.log`) and timestamped tool backups (`*.2026-*-*Z`) are excluded as well.
-- The unit-test scaffolding (`server/services/__tests__/`) contains machine-specific paths and process names; it is excluded by `.gitignore` and not distributed.
+- The unit-test subset (`server/services/__tests__/`) is **desensitised and distributed with the repo**: it only depends on a `%TEMP%` sandbox and the system PowerShell, contains no machine-specific absolute paths, usernames or private directories, and can be rerun on any Windows machine with `npm test`. Conversely, the end-to-end runner (`tests/`), the root-level targeted scripts (`_*.js`) and `baseline.json` contain real paths and process lists and remain excluded by `.gitignore`.
 - Zero dependencies, no project secrets; the service listens only on `127.0.0.1` and is not exposed externally. See gate 0 in "Nine Safety Gates" above for access control.
 
 ## FAQ
@@ -296,12 +344,13 @@ There is no formal external contribution process yet. If you want to modify it y
 1. Read `最终测试报告.md` and `改动清单_实施总账.md` first to learn the existing safety constraints and historical pitfalls
    (for example: `force` must not be used to allow a batch, and freed memory must not be computed from the whole-machine memory delta).
 2. Do not commit runtime artifacts — `data/snapshot.json`, `内存清理助手.html`, `logs/`, `*.log` are already excluded by `.gitignore`; please do not `git add -f` them.
-3. Run the local tests after changes: `node --test server/services/__tests__/*.test.js`
-   (Node 24 requires the `*.test.js` glob; passing just the directory fails).
+3. Run the tests after changes: `npm test` (same as `node --test "server/services/__tests__/*.test.js"`;
+   Node 24 requires the `*.test.js` glob, passing just the directory fails). Before committing you can run
+   `npm run verify` (`node --check` on the four entry points + the unit tests). CI runs exactly `npm test` on a Windows runner.
 4. For UI changes, edit `_template.html` and then run `node build.js` to regenerate the single-file UI —
    editing `内存清理助手.html` directly will be overwritten by the next build.
 
 ## License
 
-This project **does not yet ship a LICENSE file; no license has been specified**. Please check with the author before using, modifying, or distributing it.
-(The author can add a `LICENSE` file to the repo root later if they choose to open-source it.)
+MIT — see [LICENSE](LICENSE). The software is provided "as is", without warranty of any kind: this tool
+terminates processes and deletes files, and you use it at your own risk.
