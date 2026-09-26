@@ -9,11 +9,11 @@
  *   3. 兜底 → caution（不默认放行，也不默认禁止）
  */
 
-const path = require('path');
 const fs = require('fs');
+const { data } = require('../../lib/paths');
 
-const PROTECTED_PATH = path.join(__dirname, '..', '..', 'data', 'protectedProcesses.json');
-const DICT_PATH = path.join(__dirname, '..', '..', 'data', 'appDict.zh.json');
+const PROTECTED_PATH = data('protectedProcesses.json');
+const DICT_PATH = data('appDict.zh.json');
 
 let _protectedMap = null;
 let _dict = null;

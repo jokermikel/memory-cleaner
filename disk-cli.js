@@ -133,11 +133,11 @@ function printVolumes() {
   }
 }
 
-function printJunk() {
+async function printJunk() {
   console.log('\n════════════════════════════════════════════════');
   console.log('  可清理垃圾（按词典分类，已去重）');
   console.log('════════════════════════════════════════════════');
-  const junk = locate();
+  const junk = await locate();
   junk.items.filter(i => i.bytes > 0).forEach(i => {
     const tag = i.risk === 'safe' ? '🟢可清' : '🟡谨慎';
     console.log(`  ${tag}  ${fmt(i.bytes).padStart(10)}  ${i.name}`);
@@ -147,8 +147,8 @@ function printJunk() {
   console.log(`  🟡 谨慎项合计   ${fmt(junk.cautionBytes)}（含微信/腾讯视频等用户数据，默认不删）`);
 }
 
-function printPlan() {
-  const p = plan();
+async function printPlan() {
+  const p = await plan();
   console.log('\n════════════════════════════════════════════════');
   console.log('  磁盘清理计划（dry-run，不会删除）');
   console.log('════════════════════════════════════════════════');
@@ -159,33 +159,36 @@ function printPlan() {
   console.log('  要真正删除请用界面：启动.bat → C/D 磁盘 → 确认删除勾选项');
 }
 
-if (arg === 'inspect') {
-  printInspect(process.argv[3]);
-} else if (arg === 'migrate') {
-  printMigrate(process.argv[3], process.argv[4]);
-} else if (arg === 'c' || arg === 'c:') {
-  console.log('\n正在扫描 C: …');
-  printDrive(runScan('C:', C_TOP, junkForDrive('C:')));
-} else if (arg === 'd' || arg === 'd:') {
-  console.log('\n正在扫描 D: …');
-  printDrive(runScan('D:', [], junkForDrive('D:')));
-} else if (arg === 'apps') {
-  printVolumes();
-  console.log('\n正在按应用归类（30~60 秒）…');
-  const an = analyze();
-  console.log('\n════════════════════════════════════════════════');
-  console.log('  按应用占用（C + D）');
-  console.log('════════════════════════════════════════════════');
-  an.apps.slice(0, 20).forEach((a, i) => {
-    console.log(`  ${String(i + 1).padStart(2)}. ${fmt(a.bytes).padStart(10)}  ${a.name}`);
-    console.log(`        ${a.category} · ${a.vendor} · ${a.purpose}`);
-  });
-} else if (arg === 'plan') {
-  printVolumes();
-  printPlan();
-} else {
-  printVolumes();
-  printJunk();
-}
+// 长期-2：扫描/量算入口已改为异步（不再阻塞事件循环），CLI 的分发同样要等。
+(async function main() {
+  if (arg === 'inspect') {
+    printInspect(process.argv[3]);
+  } else if (arg === 'migrate') {
+    printMigrate(process.argv[3], process.argv[4]);
+  } else if (arg === 'c' || arg === 'c:') {
+    console.log('\n正在扫描 C: …');
+    printDrive(await runScan('C:', C_TOP, junkForDrive('C:')));
+  } else if (arg === 'd' || arg === 'd:') {
+    console.log('\n正在扫描 D: …');
+    printDrive(await runScan('D:', [], junkForDrive('D:')));
+  } else if (arg === 'apps') {
+    printVolumes();
+    console.log('\n正在按应用归类（30~60 秒）…');
+    const an = await analyze();
+    console.log('\n════════════════════════════════════════════════');
+    console.log('  按应用占用（C + D）');
+    console.log('════════════════════════════════════════════════');
+    an.apps.slice(0, 20).forEach((a, i) => {
+      console.log(`  ${String(i + 1).padStart(2)}. ${fmt(a.bytes).padStart(10)}  ${a.name}`);
+      console.log(`        ${a.category} · ${a.vendor} · ${a.purpose}`);
+    });
+  } else if (arg === 'plan') {
+    printVolumes();
+    await printPlan();
+  } else {
+    printVolumes();
+    await printJunk();
+  }
 
-console.log(`\n完成，耗时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒\n`);
+  console.log(`\n完成，耗时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒\n`);
+})();

@@ -5,30 +5,18 @@
  * 按 PID 合并成统一结构。
  */
 
-const { execFileSync } = require('child_process');
-const path = require('path');
-const os = require('os');
+const { runPsFile, cleanText } = require('../../lib/psRunner');
+const { collector } = require('../../lib/paths');
 
-const PS1_PATH = path.join(__dirname, 'collect.ps1');
+const PS1_PATH = collector('collect.ps1');
 
 /**
  * 执行采集脚本并返回解析后的 JSON。
  */
-function runCollector(includeServices) {
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', PS1_PATH];
-  if (includeServices) args.push('-IncludeServices');
+function runCollector() {
+  const out = runPsFile(PS1_PATH, {}, { timeout: 15000, maxBuffer: 64 * 1024 * 1024 });
 
-  const out = execFileSync('powershell.exe', args, {
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 15000,
-    windowsHide: true
-  });
-
-  // 去除可能的 BOM 和首尾空白
-  let text = out;
-  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-  text = text.trim();
+  const text = cleanText(out); // 去 BOM 与首尾空白
   if (!text) throw new Error('采集脚本返回空输出');
 
   try {
@@ -45,8 +33,8 @@ function runCollector(includeServices) {
  * 把两路数据源合并成统一进程结构。
  * @returns {{processes:Array, snapshot:Object}}
  */
-function collectProcesses(includeServices) {
-  const snap = runCollector(includeServices);
+function collectProcesses() {
+  const snap = runCollector();
 
   const { asArray } = require('./systemMemory');
 
@@ -62,14 +50,11 @@ function collectProcesses(includeServices) {
       privateBytes: p.privateBytes || 0,
       pagedMemory: p.pagedMemory || 0,
       virtualBytes: p.virtualBytes || 0,
-      threadCount: p.threadCount || 0,
-      handleCount: p.handleCount || 0,
       startTime: p.startTime || null,
       cpuSeconds: p.cpuSeconds || 0,
       ppid: cim.ParentProcessId != null ? cim.ParentProcessId : null,
       parentName: null, // 稍后填充
-      path: cim.ExecutablePath || null,
-      commandLine: cim.CommandLine || null
+      path: cim.ExecutablePath || null
     };
   });
 
@@ -91,9 +76,7 @@ function collectProcesses(includeServices) {
       cs: snap.cs || null,
       modules: asArray(snap.modules),
       pagefile: snap.pagefile || null,
-      perfOs: snap.perfOs || null,
-      perfProc: snap.perfProc || null,
-      services: snap.services || null
+      perfOs: snap.perfOs || null
     }
   };
 }

@@ -21,8 +21,19 @@ public static class CcWsTrim {
   public static extern bool EmptyWorkingSet(IntPtr hProcess);
   [DllImport("kernel32.dll", SetLastError=true)]
   public static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr min, IntPtr max);
+  // PROCESS_QUERY_LIMITED_INFORMATION (0x1000) | PROCESS_SET_QUOTA (0x0100).
+  // Deliberately narrower than Process.Handle, which asks for PROCESS_ALL_ACCESS
+  // semantics and is therefore refused for processes we do not own.
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern IntPtr OpenProcess(int access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool CloseHandle(IntPtr h);
 }
 "@
+
+# Open with the narrow mask first; fall back to Process.Handle only if even that
+# is refused. SetProcessWorkingSetSize needs PROCESS_SET_QUOTA, which 0x1100 has.
+$CC_OPEN_NARROW = 0x1100
 
 function Write-Utf8($path, $text) {
   [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding $false))
@@ -153,8 +164,20 @@ foreach ($t in $targets) {
   }
   $entry.verified = [bool]$reuse.verified
 
+  # Narrow handle first (Q9): Process.Handle asks for a far wider access mask, so
+  # it is denied for processes owned by other users even though trimming only
+  # needs PROCESS_SET_QUOTA.
   $handle = [IntPtr]::Zero
-  try { $handle = $proc.Handle } catch { $handle = [IntPtr]::Zero }
+  $owned = $false
+  try {
+    $handle = [CcWsTrim]::OpenProcess($CC_OPEN_NARROW, $false, $targetPid)
+    if ($handle -ne [IntPtr]::Zero) { $owned = $true }
+  } catch { $handle = [IntPtr]::Zero }
+
+  if ($handle -eq [IntPtr]::Zero) {
+    try { $handle = $proc.Handle } catch { $handle = [IntPtr]::Zero }
+  }
+
   if ($handle -eq [IntPtr]::Zero) {
     $entry.error = 'open_process_denied'
     [void]$results.Add($entry)
@@ -163,20 +186,25 @@ foreach ($t in $targets) {
 
   $trimmed = $false
   try {
-    $trimmed = [CcWsTrim]::EmptyWorkingSet($handle)
-    if ($trimmed) { $entry.method = 'EmptyWorkingSet' }
-  } catch {
-    $trimmed = $false
-  }
-
-  if (-not $trimmed) {
     try {
-      $neg = [IntPtr]::new(-1)
-      $trimmed = [CcWsTrim]::SetProcessWorkingSetSize($handle, $neg, $neg)
-      if ($trimmed) { $entry.method = 'SetProcessWorkingSetSize' }
+      $trimmed = [CcWsTrim]::EmptyWorkingSet($handle)
+      if ($trimmed) { $entry.method = 'EmptyWorkingSet' }
     } catch {
       $trimmed = $false
     }
+
+    if (-not $trimmed) {
+      try {
+        $neg = [IntPtr]::new(-1)
+        $trimmed = [CcWsTrim]::SetProcessWorkingSetSize($handle, $neg, $neg)
+        if ($trimmed) { $entry.method = 'SetProcessWorkingSetSize' }
+      } catch {
+        $trimmed = $false
+      }
+    }
+  } finally {
+    # Only close handles we opened ourselves; Process.Handle is owned by .NET.
+    if ($owned) { try { [void][CcWsTrim]::CloseHandle($handle) } catch { } }
   }
 
   Start-Sleep -Milliseconds 80

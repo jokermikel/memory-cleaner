@@ -13,10 +13,17 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync, execFile } = require('child_process');
+const { runPsCommand, cleanText } = require('../../lib/psRunner');
+const { appendAudit } = require('../../lib/auditLog');
+const { data } = require('../../lib/paths');
 
-const WS = path.join(__dirname, '..', '..');
-const LOG_DIR = path.join(WS, 'logs');
-const STATE_FILE = path.join(WS, 'data', 'cache-migrations.json');
+/**
+ * 迁移记录状态文件（界面「可撤销的迁移记录」读的就是它）。
+ * `CC_MIGRATE_STATE_FILE` 只给自动化测试用：迁移测试跑的是**真迁移**，会把沙箱记录
+ * 追加进来，改指临时文件才能避免把 `%TEMP%` 里的测试记录混进用户真实记录（遗留-37）。
+ * 未设置时行为与原先完全一致。
+ */
+const STATE_FILE = process.env.CC_MIGRATE_STATE_FILE || data('cache-migrations.json');
 const DEFAULT_KEEP_DAYS = 7;
 const MIGRATION_LOCKS = new Map();
 
@@ -36,13 +43,9 @@ function ensureDir(d) {
   try { fs.mkdirSync(d, { recursive: true }); } catch (e) { /* ignore */ }
 }
 
+/** 写审计日志（实现见 lib/auditLog.js，短期-11 归一） */
 function audit(line) {
-  ensureDir(LOG_DIR);
-  const d = new Date();
-  const ymd = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
-  const file = path.join(LOG_DIR, `cache-migrate-${ymd}.log`);
-  try { fs.appendFileSync(file, `[${d.toISOString()}] ${line}\n`, 'utf8'); } catch (e) { /* ignore */ }
-  return file;
+  return appendAudit('cache-migrate', line);
 }
 
 function expand(p) {
@@ -278,10 +281,9 @@ function probeSourceLocked(root, opts = {}) {
 function driveFreeBytes(letter) {
   if (!letter) return 0;
   try {
-    const out = execFileSync('powershell.exe', [
-      '-NoProfile', '-Command',
-      `(Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='${letter}'").FreeSpace`
-    ], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    const out = runPsCommand(
+      `(Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='${letter}'").FreeSpace`,
+      { timeout: 15000 });
     const n = Number(String(out).trim());
     return Number.isFinite(n) ? n : 0;
   } catch (e) {
@@ -315,7 +317,7 @@ function saveState(state) {
 }
 
 function loadPresets() {
-  const dictPath = path.join(WS, 'data', 'junkDict.zh.json');
+  const dictPath = data('junkDict.zh.json');
   const dict = JSON.parse(fs.readFileSync(dictPath, 'utf8'));
   const items = [];
   for (const e of dict.entries || []) {
@@ -611,9 +613,7 @@ function inspectPath(targetPath) {
     '"$reparse|$kind|$tgt"'
   ].join('; ');
   try {
-    const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', ps], {
-      encoding: 'utf8', windowsHide: true, timeout: 15000
-    }).replace(/^\uFEFF/, '').trim();
+    const out = cleanText(runPsCommand(ps, { timeout: 15000 }));
     if (out === 'MISSING') {
       result.exists = false;
       result.type = 'missing';
@@ -1002,6 +1002,8 @@ async function executeUnlocked(opts = {}) {
     saveState(state);
 
     audit(`EXECUTED ${check.source} -> ${check.destination} via ${check.linkType}; backup ${backupPath}`);
+    // 顺着这次动作清一次过期备份（短期-9）：常驻进程下备份与记录不应只增不减。
+    purgeAfterAction();
     return {
       mode: 'executed',
       action: 'cache-migrate',
@@ -1165,7 +1167,31 @@ async function rollbackMigrationUnlocked(src, opts = {}) {
 }
 
 async function rollbackMigration(src, opts = {}) {
-  return withMigrationLock(src, () => rollbackMigrationUnlocked(src, opts));
+  return withMigrationLock(src, async () => {
+    const r = await rollbackMigrationUnlocked(src, opts);
+    purgeAfterAction();
+    return r;
+  });
+}
+
+/**
+ * 迁移/回滚结束后顺带清一次过期备份（短期-9）。
+ *
+ * 原先只在服务启动时清一次：常驻进程（这工具本来就是「开着不动」的用法）
+ * 运行数周也不会再清理，备份目录与状态记录只增不减。放在动作之后调用，
+ * 使「每次真正动过迁移记录」都带上一次清理；服务端另有定时兜底。
+ *
+ * 失败不抛出：清理是收尾动作，不能反过来让已经成功的迁移/回滚报错。
+ */
+function purgeAfterAction() {
+  try {
+    const r = purgeExpiredBackups();
+    if (r.purged.length) audit(`PURGE-AFTER-ACTION 清理 ${r.purged.length} 条过期备份`);
+    return r;
+  } catch (e) {
+    audit('PURGE-AFTER-ACTION-FAILED ' + e.message);
+    return null;
+  }
 }
 
 function purgeExpiredBackups(nowMs) {

@@ -4,10 +4,6 @@
 # so non-ASCII literals here would be corrupted. Chinese text lives in the
 # Node-side dictionary (data/appDict.zh.json) instead.
 
-param(
-  [switch]$IncludeServices
-)
-
 $ErrorActionPreference = 'SilentlyContinue'
 $script:errors = New-Object System.Collections.ArrayList
 
@@ -53,16 +49,10 @@ $perfOs = SafeGet {
                   PoolPagedBytes, PoolNonpagedBytes
 } 'perfOs'
 
-# ---------- 3c. per-process performance counters ----------
-$perfProc = SafeGet {
-  Get-CimInstance -ClassName Win32_PerfFormattedData_PerfProc_Process |
-    Select-Object Name, IDProcess, PageFaultsPersec, IOReadBytesPersec, IOWriteBytesPersec
-} 'perfProc'
-
 # ---------- 4. process table ----------
 # Two sources merged by PID:
 #   a) Get-Process  -> accurate WorkingSet64 / PrivateMemorySize64 (matches Task Manager)
-#   b) Win32_Process -> ParentProcessId / ExecutablePath / CommandLine (CIM only)
+#   b) Win32_Process -> ParentProcessId / ExecutablePath (CIM only)
 $getProc = SafeGet {
   Get-Process | ForEach-Object {
     [pscustomobject]@{
@@ -72,11 +62,7 @@ $getProc = SafeGet {
       privateBytes  = $_.PrivateMemorySize64
       pagedMemory   = $_.PagedMemorySize64
       virtualBytes  = $_.VirtualMemorySize64
-      threadCount   = $_.Threads.Count
-      handleCount   = $_.HandleCount
       startTime     = if ($_.StartTime) { $_.StartTime.ToString('o') } else { $null }
-      mainWindow    = $_.MainWindowHandle
-      responding    = $_.Responding
       cpuSeconds    = if ($_.CPU) { [math]::Round($_.CPU, 3) } else { 0 }
     }
   }
@@ -84,7 +70,7 @@ $getProc = SafeGet {
 
 $cimProc = SafeGet {
   Get-CimInstance -ClassName Win32_Process |
-    Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, CreationDate
+    Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CreationDate
 } 'cimProcess'
 
 if (-not $getProc) { $getProc = @() }
@@ -96,16 +82,7 @@ if ($null -eq $getProc) { $getProc = @() } else { $getProc = @($getProc) }
 if ($null -eq $cimProc) { $cimProc = @() } else { $cimProc = @($cimProc) }
 if ($null -eq $script:errors) { $script:errors = @() } else { $script:errors = @($script:errors) }
 
-# ---------- 5. scheduled service map (only when requested) ----------
-$serviceMap = $null
-if ($IncludeServices) {
-  $serviceMap = SafeGet {
-    Get-CimInstance -ClassName Win32_Service |
-      Select-Object Name, DisplayName, ProcessId, State, StartMode |
-      Where-Object { $_.ProcessId -gt 0 }
-  } 'serviceMap'
-}
-
+# ---------- 5. privilege state ----------
 $isAdmin = $false
 try {
   $wi = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -125,10 +102,8 @@ $result = [ordered]@{
   modules       = $modules
   pagefile      = $pagefile
   perfOs        = $perfOs
-  perfProc      = $perfProc
   processes     = $getProc
   cimProcesses  = $cimProc
-  services      = $serviceMap
   errors        = $script:errors
 }
 

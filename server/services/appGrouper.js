@@ -10,14 +10,16 @@
  *   5. 归组后合计内存必须等于归组前合计（守恒）
  */
 
-const path = require('path');
-const fs = require('fs');
+const { loadJsonCached } = require('../../lib/dictCache');
+const { data } = require('../../lib/paths');
 
-const DICT_PATH = path.join(__dirname, '..', '..', 'data', 'appDict.zh.json');
+const DICT_PATH = data('appDict.zh.json');
 
+// 词典在热路径上（每次刷新快照都归组一次），按文件状态缓存，见 lib/dictCache.js。
+// 返回值只读：groupApps 只用 lookup() 取值，不会改词典。
 function loadDict() {
   try {
-    return JSON.parse(fs.readFileSync(DICT_PATH, 'utf8'));
+    return loadJsonCached(DICT_PATH);
   } catch (e) {
     return { entries: {} };
   }
@@ -39,14 +41,30 @@ function groupApps(processes) {
   const byPid = new Map();
   for (const p of processes) byPid.set(p.pid, p);
 
-  // 第一步：计算每个进程的归属 key
-  const procKeys = new Map(); // pid -> key
+  // 第一步：先算出**与父进程无关**的基准 key，得到完整的 pid -> key 映射，
+  // 第二步才解析 parentFollow。两趟必须分开：原实现边填 procKeys 边读它，
+  // 当子进程先于父进程出现在数组里（PID 回绕时会发生）父链就查不到，
+  // 于是静默退化为「按名字分组」——同一台机器两次刷新的分组结果因此不一致，
+  // 而内存守恒校验照样通过，没有任何守卫会报警。
+  const baseKeys = new Map(); // pid -> key（只取决于自身与词典）
+  for (const p of processes) baseKeys.set(p.pid, baseKeyOf(p, dict));
+
+  // 环路保护：父链成环的进程一律不跟随父进程（见 chainWouldCycle 说明）。
+  // 成环时「环上每个成员各自保留自身基准 key」，因此结果与进程数组顺序无关。
+  const mayFollow = new Set();
   for (const p of processes) {
-    const key = resolveKey(p, dict, byPid, procKeys);
-    procKeys.set(p.pid, key);
+    const entry = lookup(dict, p.name);
+    if (entry && entry.parentFollow && !entry.alwaysGroupTo && p.ppid && !chainWouldCycle(p, dict, byPid)) {
+      mayFollow.add(p.pid);
+    }
   }
 
-  // 第二步：按 key 聚合
+  const procKeys = new Map(); // pid -> key（含父链跟随的最终结果）
+  for (const p of processes) {
+    procKeys.set(p.pid, resolveKey(p, dict, byPid, baseKeys, procKeys, mayFollow));
+  }
+
+  // 第三步：按 key 聚合
   const groups = new Map();
   for (const p of processes) {
     const key = procKeys.get(p.pid) || p.name;
@@ -83,7 +101,7 @@ function groupApps(processes) {
   const apps = Array.from(groups.values());
   apps.sort((a, b) => b.workingSetBytes - a.workingSetBytes);
 
-  // 第三步：守恒校验
+  // 第四步：守恒校验
   const totalBytes = processes.reduce((sum, p) => sum + (p.workingSet || 0), 0);
   const groupedBytes = apps.reduce((sum, a) => sum + a.workingSetBytes, 0);
 
@@ -91,28 +109,67 @@ function groupApps(processes) {
 }
 
 /**
- * 解析单个进程归属的应用 key。
+ * 沿父链向上走，判断是否会回到链上已出现过的 pid（即成环）。
+ *
+ * 成环只可能来自异常快照 / PID 复用。返回 true 时该进程不跟随父进程、
+ * 保留自身基准 key：这样环上每个成员都各自保留，结果与「谁先被解析」无关。
+ * 反之（谁先被解析谁存活）会让同一份数据随数组顺序漂移，而刷新之间 PID 顺序
+ * 本来就不保证稳定 —— 那等于换了个地方复现原来的不确定性。
+ *
+ * @param {Set} seen 链上已出现的 pid
  */
-function resolveKey(p, dict, byPid, procKeys) {
+function chainWouldCycle(p, dict, byPid) {
+  const seen = new Set([p.pid]);
+  let cur = p;
+  for (;;) {
+    const entry = lookup(dict, cur.name);
+    if (!entry || !entry.parentFollow || !cur.ppid) return false;
+    const parent = byPid.get(cur.ppid);
+    if (!parent) return false;
+    if (seen.has(parent.pid)) return true;
+    seen.add(parent.pid);
+    cur = parent;
+  }
+}
+
+/**
+ * 进程的基准 key：只取决于自身与词典，与父进程无关（对应规则 1 / 3 / 4）。
+ */
+function baseKeyOf(p, dict) {
   const entry = lookup(dict, p.name);
-
-  // 规则 1：强制并入指定应用
   if (entry && entry.alwaysGroupTo) return entry.alwaysGroupTo;
+  if (p.name === 'svchost') return 'svchost';
+  return p.name;
+}
 
-  // 规则 2：跟随父进程（处理 crashpad_handler、msedgewebview2 这类被宿主内嵌的组件）
-  if (entry && entry.parentFollow && p.ppid) {
+/**
+ * 解析单个进程归属的应用 key（对应规则 2 的父链跟随）。
+ *
+ * `mayFollow` 已排除成环者，因此跟随图无环、递归必然终止；
+ * 结果按 pid 记忆化，同一份快照无论进程顺序如何，分组结果都一致。
+ *
+ * @param {Map} baseKeys 基准 key 表，先于本函数全量建好
+ * @param {Map} procKeys pid -> 已解析的最终 key
+ * @param {Set} mayFollow 允许跟随父进程的 pid 集合
+ */
+function resolveKey(p, dict, byPid, baseKeys, procKeys, mayFollow) {
+  const memo = procKeys.get(p.pid);
+  if (memo !== undefined) return memo;
+
+  let key = baseKeys.get(p.pid);
+
+  // 规则 2：跟随父进程（处理 crashpad_handler、msedgewebview2 这类被宿主内嵌的组件）。
+  // 词典里 alwaysGroupTo 的优先级高于 parentFollow，与单趟实现保持一致。
+  if (mayFollow.has(p.pid)) {
     const parent = byPid.get(p.ppid);
     if (parent) {
-      const parentKey = procKeys.get(parent.pid);
-      if (parentKey && parentKey !== p.name) return parentKey;
+      const parentKey = resolveKey(parent, dict, byPid, baseKeys, procKeys, mayFollow);
+      if (parentKey && parentKey !== p.name) key = parentKey;
     }
   }
 
-  // 规则 3：svchost 特殊折叠
-  if (p.name === 'svchost') return 'svchost';
-
-  // 规则 4：同名进程归组
-  return p.name;
+  procKeys.set(p.pid, key);
+  return key;
 }
 
 module.exports = { groupApps, loadDict, FALLBACK };

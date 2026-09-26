@@ -9,9 +9,11 @@ const http = require('http');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
+const { resolvePort, EXIT_PORT_IN_USE } = require('./lib/ports');
 
 const ROOT = __dirname;
-const PORT = 7788;
+// 端口唯一来源：CC_PORT 环境变量可覆盖，默认值在 lib/ports.js（与 server.js 同源）。
+const PORT = resolvePort();
 const NODE = process.execPath;
 const LOG_FILE = path.join(ROOT, 'launch.log');
 
@@ -23,7 +25,7 @@ function parseReplacePid(argv) {
 }
 
 /**
- * 提权后接管：先停掉旧的普通权限服务（含其子进程），再占用 7788。
+ * 提权后接管：先停掉旧的普通权限服务（含其子进程），再占用端口。
  * Windows 上 process.kill 不会带上子进程，必须用 taskkill /T。
  */
 function stopOldInstance(oldPid) {
@@ -50,6 +52,42 @@ function isAdmin() {
   } catch (e) {
     return false;
   }
+}
+
+/**
+ * 探测端口是否已有进程在监听。
+ *
+ * 为什么必须先探测再启动：`waitPort` 只能回答「这个端口有没有人在听」，回答不了
+ * 「在听的是不是我们刚起的服务」。端口被别的程序占用时，旧实现会把它当成
+ * 「服务已就绪」，然后把浏览器指向别人的服务 —— 用户看到的是一张陌生页面，
+ * 而真正的服务早就以 EADDRINUSE 退出了。
+ */
+function probePort(port) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const sock = net.connect({ host: '127.0.0.1', port });
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      try { sock.destroy(); } catch (e) { }
+      resolve(v);
+    };
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+    setTimeout(() => done(false), 1500);
+  });
+}
+
+/** 端口被占用时给用户的可操作提示。 */
+function logPortBusyHint() {
+  log('[ERROR] 端口 ' + PORT + ' 已被占用，服务无法启动。');
+  log('');
+  log('  若 Memory Cleaner 已在运行：');
+  log('     直接打开 http://127.0.0.1:' + PORT + '/ 使用即可，本窗口可以关闭。');
+  log('  若是其它程序占用该端口：');
+  log('     先结束该程序，或者换端口启动（命令行执行）：');
+  log('       set CC_PORT=8899 && 启动.bat');
+  log('');
 }
 
 function waitPort(port, timeoutMs) {
@@ -100,6 +138,12 @@ async function main() {
   const replacePid = parseReplacePid(process.argv);
   if (replacePid) stopOldInstance(replacePid);
 
+  // 端口预检：放在停止旧实例之后，避免把刚接管的端口误判为被占用。
+  if (await probePort(PORT)) {
+    logPortBusyHint();
+    process.exit(EXIT_PORT_IN_USE);
+  }
+
   log('[1/3] collecting snapshot...');
   const buildCode = await runNode('build.js', []);
   if (buildCode !== 0) {
@@ -123,10 +167,33 @@ async function main() {
     log('[ERROR] server spawn failed: ' + err.message);
   });
 
-  const ready = await waitPort(PORT, 20000);
-  if (!ready) {
-    log('[ERROR] port ' + PORT + ' not listening in 20s.');
-    log('        close other app using 7788, then retry.');
+  // 就绪判定不能只看「端口有人在听」——端口被别的程序占用时那是别人的服务。
+  // 因此与「server 进程已退出」竞速：谁先到就以谁为准，退出时带上退出码。
+  // 只有一个 exit 监听器：就绪之前它负责判失败，就绪之后它负责收尾退出。
+  let outcomeSettled = false;
+  let serverExitCode = null;
+  const exitedEarly = new Promise((resolve) => {
+    server.on('exit', (code) => {
+      serverExitCode = code == null ? 0 : code;
+      log('server stopped, code=' + serverExitCode);
+      if (!outcomeSettled) resolve('exit');
+      else process.exit(serverExitCode);
+    });
+  });
+  const outcome = await Promise.race([waitPort(PORT, 20000).then(ok => (ok ? 'ready' : 'timeout')), exitedEarly]);
+  outcomeSettled = true;
+
+  if (outcome === 'exit' || (outcome === 'ready' && serverExitCode !== null)) {
+    if (serverExitCode === EXIT_PORT_IN_USE) {
+      logPortBusyHint();
+      process.exit(EXIT_PORT_IN_USE);
+    }
+    log('[ERROR] 服务进程已退出，退出码 ' + serverExitCode + '（详见上方输出与 launch.log）。');
+    process.exit(serverExitCode || 1);
+  }
+  if (outcome === 'timeout') {
+    log('[ERROR] 端口 ' + PORT + ' 在 20 秒内没有就绪。');
+    log('        可能被其它程序占用、或被防火墙拦截；可执行 netstat -ano | findstr :' + PORT + ' 查看占用者。');
     process.exit(1);
   }
 
@@ -155,11 +222,6 @@ async function main() {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-
-  server.on('exit', (code) => {
-    log('server stopped, code=' + code);
-    process.exit(code || 0);
-  });
 }
 
 main().catch((e) => {

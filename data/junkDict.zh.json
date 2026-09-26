@@ -12,8 +12,8 @@
       "category": "临时文件",
       "risk": "safe",
       "vendor": "系统",
-      "paths": ["%TEMP%"],
-      "note": "示例量级：数百 MB（因机器而异）"
+      "paths": ["%TEMP%", "%LOCALAPPDATA%\\Temp"],
+      "note": "示例量级：数百 MB（因机器而异）；两条路径在 TEMP 未被改写时通常同址，定位器会去重"
     },
     {
       "id": "win-update-cache",
@@ -54,6 +54,16 @@
       "vendor": "系统",
       "paths": ["%LOCALAPPDATA%\\CrashDumps"],
       "note": "示例量级：数十 MB（因机器而异）"
+    },
+    {
+      "id": "inet-cache",
+      "name": "系统网络缓存（INetCache）",
+      "purpose": "WinINet 网络临时文件，IE/部分桌面程序与系统组件共用，删除后会自动重建",
+      "category": "系统缓存",
+      "risk": "safe",
+      "vendor": "Microsoft",
+      "paths": ["%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache"],
+      "note": "示例量级：数十至数百 MB（因机器而异）"
     },
     {
       "id": "thumbcache",

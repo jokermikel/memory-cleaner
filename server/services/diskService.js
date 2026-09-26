@@ -17,9 +17,11 @@ function fmt(bytes) {
 
 /**
  * 采集一次完整磁盘快照。
+ * 长期-2：改为异步（scanDisks 内部是数十秒的全盘扫描，不该占满事件循环）。
+ * @param {Object} [ctx] 任务上下文 { signal, progress }
  */
-function snapshot() {
-  const raw = scanDisks();
+async function snapshot(ctx = {}) {
+  const raw = await scanDisks(ctx);
 
   const drives = raw.drives.map(d => {
     const usedPercent = d.totalBytes ? Math.round(d.usedBytes / d.totalBytes * 1000) / 10 : 0;

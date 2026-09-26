@@ -29,7 +29,7 @@ function fmtBar(bytes, max) {
 const arg = process.argv[2];
 
 process.stdout.write('\n正在采集内存数据…\n');
-const r = snapshot(true);
+const r = snapshot();
 const s = r.system;
 
 // 顶部概览

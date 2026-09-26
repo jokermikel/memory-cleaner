@@ -3,10 +3,10 @@
  * server.js — HTTP 服务入口
  * 零依赖（Node 内置 http）。挂载内存查询接口 + 全部写接口
  * （cleanup/execute、disk/cleanup/execute、disk/migrate/execute、privilege/elevate 等）。
- * 启动：node server.js [端口]，默认 7788
+ * 启动：node server.js [端口]，端口来源见 lib/ports.js（显式参数 > CC_PORT > 7788）
  *
  * ── 访问控制（三层，见 checkRequestAuth）──
- *   1. Host 必须指向环回地址（127.0.0.1 / localhost / ::1）
+ *   1. Host 必须存在且指向环回地址（127.0.0.1 / localhost / ::1）；缺失同样拒绝
  *   2. 带 Origin 的跨源请求必须与本服务同源同端口
  *   3. token 校验：写操作（POST 等）**以及一切非豁免的只读接口**都要带
  *      本进程启动时生成的一次性 token；只有 CHEAP_READ_PATHS 里那些毫秒级、
@@ -22,8 +22,12 @@ const http = require('http');
 const crypto = require('crypto');
 const { handleMemoryRoutes } = require('./routes/memory');
 const cacheMigrate = require('./services/cacheMigrateService');
+// 批量上限的唯一来源是 cleanupService；这里只借它下发给前端，避免页面里出现第二份硬编码（短期-17 / Q5）。
+const { BATCH_LIMIT } = require('./services/cleanupService');
+const { resolvePort, EXIT_PORT_IN_USE } = require('../lib/ports');
 
-const PORT = Number(process.argv[2]) || 7788;
+// 端口唯一来源：显式参数 > 环境变量 CC_PORT > 默认值（见 lib/ports.js）。
+const PORT = resolvePort(process.argv[2]);
 
 /** 一次性访问 token（每次启动重新生成，不落盘） */
 const ACCESS_TOKEN = crypto.randomBytes(32).toString('hex');
@@ -56,10 +60,25 @@ const CHEAP_READ_PATHS = new Set([
   '/api/health',                  // 端口探活（launcher 依赖）
   '/api/cleanup/io',              // 磁盘吞吐采样，毫秒级
   '/api/disk/volumes',            // 分区容量（Win32_LogicalDisk），毫秒级
-  '/api/disk/migrate/inspect',    // 单个路径的链接类型检查
   '/api/disk/migrate/records',    // 迁移记录（读本地 JSON）
   '/api/privilege/status'         // 是否管理员
 ]);
+
+/**
+ * 零成本安全响应头。令牌就写在首页正文里，而这些接口能结束进程、删文件，
+ * 因此防 MIME 嗅探、防被嵌套是最便宜的纵深防御：
+ *   - X-Content-Type-Options: nosniff  禁止浏览器按内容猜类型（防 HTML 嗅探执行）
+ *   - X-Frame-Options: DENY            禁止被任何页面以 iframe 嵌套（防点击劫持）
+ *   - Referrer-Policy: no-referrer     跨站跳转不携带本机地址
+ * 统一用 res.setHeader 在请求入口设置，writeHead 会自动合并，
+ * 因此首页、sendJson、路由层各自的响应都覆盖到，无需逐处复制。
+ * CSP 暂不启用：模板大量使用内联脚本，需先配 nonce 或接受 'unsafe-inline'。
+ */
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer'
+};
 
 /** 定长比较，避免时序侧信道 */
 function safeEqual(a, b) {
@@ -82,12 +101,15 @@ function checkRequestAuth(req, pathname) {
   // 只保护 API；首页是 token 的发放点，必须放行
   if (!pathname.startsWith('/api/')) return null;
 
-  // ① Host 校验：本机服务只接受环回访问
+  // ① Host 校验：本机服务只接受环回访问。
+  //    缺失 Host（裸 socket、HTTP/1.0）同样拒绝——放行等于跳过这一层校验（fail-closed）。
   const host = hostNameOf(req.headers.host);
-  if (host && !LOCAL_HOSTS.has(host)) {
+  if (!host || !LOCAL_HOSTS.has(host)) {
     return {
       status: 403, code: 'BAD_HOST',
-      message: `拒绝访问：Host "${host}" 不是环回地址。本服务仅限本机使用。`
+      message: host
+        ? `拒绝访问：Host "${host}" 不是环回地址。本服务仅限本机使用。`
+        : '拒绝访问：请求未携带 Host 头，无法确认来自本机。本服务仅限本机使用。'
     };
   }
 
@@ -155,6 +177,9 @@ function sendJson(res, status, payload) {
 }
 
 const server = http.createServer((req, res) => {
+  // 安全响应头（在入口统一设置，后续所有 writeHead 自动合并）
+  for (const k of Object.keys(SECURITY_HEADERS)) res.setHeader(k, SECURITY_HEADERS[k]);
+
   let pathname = '/';
   let query = {};
   try {
@@ -179,7 +204,9 @@ const server = http.createServer((req, res) => {
       status: 'ok',
       time: new Date().toISOString(),
       isAdmin: admin,
-      pid: process.pid
+      pid: process.pid,
+      // 一次性下发批量上限，前端不再自行硬编码（短期-17 / Q5）
+      batchLimit: BATCH_LIMIT
     });
   }
 
@@ -187,8 +214,8 @@ const server = http.createServer((req, res) => {
   if (pathname === '/' || pathname === '/index.html') {
     try {
       const fs = require('fs');
-      const path = require('path');
-      const htmlPath = path.join(__dirname, '..', '内存清理助手.html');
+      const { HTML_FILE } = require('../lib/paths');
+      const htmlPath = HTML_FILE;
       if (fs.existsSync(htmlPath)) {
         const html = fs.readFileSync(htmlPath, 'utf8');
         // 注入本次启动的一次性 token。
@@ -220,8 +247,36 @@ const server = http.createServer((req, res) => {
   sendJson(res, 404, { error: { code: 'NOT_FOUND', message: `未找到接口：${pathname}` } });
 });
 
+/**
+ * 过期备份的定时清理间隔（短期-9）。
+ * 原先只在启动时清一次，常驻运行数周也不会再清；6 小时一次相对 7 天保留期足够密，
+ * 又不会给磁盘带来可感知负担。unref() 保证它不会拖住进程退出（测试与 Ctrl+C 都受益）。
+ */
+const PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+function purgeExpiredBackupsQuietly(reason) {
+  try {
+    const r = cacheMigrate.purgeExpiredBackups();
+    if (r.purged.length) console.log(`迁移备份清理（${reason}）：清除 ${r.purged.length} 条过期记录`);
+  } catch (e) {
+    console.error('迁移备份清理失败：', e.message);
+  }
+}
+
+/**
+ * 长任务期间不得因「连接上长时间没有数据」被掐断（长期-2）。
+ *
+ * Node 的 server.requestTimeout 默认 300000ms，实现上是给连接套接字设一个空闲超时。
+ * 磁盘扫描/清理改成异步任务后，请求体在到达时就已收全，但要等几十秒到几十分钟才有
+ * 响应 —— 期间连接上没有任何字节，默认值会把还在跑的响应连同 socket 一起销毁
+ * （客户端看到的是连接重置，而不是任何 HTTP 状态码）。关闭它对本地服务只有好处：
+ * 只监听 127.0.0.1，且除白名单外的全部 /api 都要带一次性令牌。
+ */
+server.requestTimeout = 0;
+
 server.listen(PORT, '127.0.0.1', () => {
-  try { cacheMigrate.purgeExpiredBackups(); } catch (e) { console.error('迁移备份清理失败：', e.message); }
+  purgeExpiredBackupsQuietly('启动');
+  setInterval(() => purgeExpiredBackupsQuietly('定时'), PURGE_INTERVAL_MS).unref();
   console.log(`内存数据服务已启动：http://127.0.0.1:${PORT}`);
   console.log('  访问控制：写接口需页面内下发的一次性令牌（防跨站触发清理）');
   console.log('  健康检查：  GET /api/health');
@@ -245,9 +300,16 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('  缓存迁移：  POST /api/disk/migrate/execute（默认 junction）');
   console.log('  权限状态：  GET /api/privilege/status');
   console.log('  提升权限：  POST /api/privilege/elevate（弹出 UAC）');
+  console.log('  长任务进度：GET /api/jobs（在飞任务 + 最近完成）');
+  console.log('  取消长任务：POST /api/jobs/:id/cancel');
 });
 
 server.on('error', (err) => {
   console.error('服务启动失败：', err.message);
+  // 端口被占用时用专门的退出码，让 launcher 能给出可操作提示（见 lib/ports.js）。
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`端口 ${PORT} 已被占用（可能是另一个 Memory Cleaner，或其它程序）。`);
+    process.exit(EXIT_PORT_IN_USE);
+  }
   process.exit(1);
 });

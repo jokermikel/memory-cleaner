@@ -7,11 +7,11 @@
 
 const fs = require('fs');
 const path = require('path');
+const { ROOT, HTML_FILE, TEMPLATE_FILE, data } = require('./lib/paths');
 
-const WS = __dirname;
-const TPL = path.join(WS, '_template.html');
-const OUT = path.join(WS, '内存清理助手.html');
-const SNAP_CACHE = path.join(WS, 'data', 'snapshot.json');
+const TPL = TEMPLATE_FILE;
+const OUT = HTML_FILE;
+const SNAP_CACHE = data('snapshot.json');
 
 function main() {
   if (!fs.existsSync(TPL)) {
@@ -20,8 +20,8 @@ function main() {
   }
 
   process.stdout.write('正在采集内存快照…');
-  const { snapshot } = require(path.join(WS, 'server', 'services', 'memoryService'));
-  const data = snapshot(true);
+  const { snapshot } = require(path.join(ROOT, 'server', 'services', 'memoryService'));
+  const data = snapshot();
   process.stdout.write(' 完成\n');
 
   // 缓存一份快照，便于排查

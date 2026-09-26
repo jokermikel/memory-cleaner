@@ -19,25 +19,29 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
+const { appendAudit } = require('../../lib/auditLog');
+const { ROOT } = require('../../lib/paths');
 
-const ROOT = path.join(__dirname, '..', '..');
-const LOG_DIR = path.join(ROOT, 'logs');
 const ELEVATE_VBS = path.join(ROOT, 'elevate.vbs');
 
+/** 写审计日志（实现见 lib/auditLog.js，短期-11 归一） */
 function audit(line) {
-  try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (e) { /* ignore */ }
-  const d = new Date();
-  const ymd = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
-  const file = path.join(LOG_DIR, `privilege-${ymd}.log`);
-  try { fs.appendFileSync(file, `[${d.toISOString()}] ${line}\n`, 'utf8'); } catch (e) { /* ignore */ }
-  return file;
+  return appendAudit('privilege', line);
 }
 
 /**
- * 当前进程是否以管理员运行。
+ * 管理员状态缓存。
+ * `net session` 需要启动一个子进程，本机实测首次约 65ms；而 /api/health 会被前端
+ * 轮询、磁盘清理前后也会读。该权限位在**同一个进程生命周期内不可能改变**
+ * （提权是另起一个管理员进程），所以探测一次即可，之后为纯内存读取。
+ */
+let adminCache = null;
+
+/**
+ * 实测当前进程是否以管理员运行。
  * `net session` 在非管理员下会失败，这是 Windows 上最稳的探测方式。
  */
-function isAdmin() {
+function probeIsAdmin() {
   if (process.platform !== 'win32') return false;
   try {
     execFileSync('net', ['session'], { stdio: 'ignore', windowsHide: true });
@@ -45,6 +49,17 @@ function isAdmin() {
   } catch (e) {
     return false;
   }
+}
+
+/** 当前进程是否以管理员运行（带进程内缓存，见 adminCache 说明）。 */
+function isAdmin() {
+  if (adminCache === null) adminCache = probeIsAdmin();
+  return adminCache;
+}
+
+/** 作废缓存，下次调用重新探测。提权流程后调用。 */
+function resetAdminCache() {
+  adminCache = null;
 }
 
 function psQuote(s) {
@@ -188,6 +203,10 @@ function elevate(opts = {}) {
   if (child.pid) audit('elevate wscript pid=' + child.pid);
   child.unref();
 
+  // 提权已发起：作废缓存，让后续健康检查重新探测而不是沿用旧结论。
+  // （正常情况下提权会产生一个全新的管理员进程接管服务，本进程随即退出。）
+  resetAdminCache();
+
   return {
     ok: true,
     alreadyAdmin: false,
@@ -202,6 +221,7 @@ function elevate(opts = {}) {
 
 module.exports = {
   isAdmin,
+  resetAdminCache,
   status,
   elevate,
   buildElevateCommand,

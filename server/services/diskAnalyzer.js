@@ -4,14 +4,17 @@
  * 匹配规则：最长路径前缀优先；父子目录同时扫到时，父目录扣除子目录字节，避免重复。
  */
 
-const fs = require('fs');
 const path = require('path');
 const { runScan } = require('../collectors/diskSpace');
+const { loadJsonCached } = require('../../lib/dictCache');
+const { data } = require('../../lib/paths');
 
-const MAP_PATH = path.join(__dirname, '..', '..', 'data', 'diskAppMap.json');
+const MAP_PATH = data('diskAppMap.json');
 
+// 映射表在热路径上（每次分析磁盘都读一遍），按文件状态缓存，见 lib/dictCache.js。
+// 缓存的是解析结果；下面的展开与排序仍按本次调用重算（成本远低于读盘 + JSON.parse）。
 function loadMap() {
-  const data = JSON.parse(fs.readFileSync(MAP_PATH, 'utf8'));
+  const data = loadJsonCached(MAP_PATH);
   // 展开环境变量（%LOCALAPPDATA% / %APPDATA% / %USERPROFILE%），
   // 这样映射表里的用户路径在任意 Windows 机器上都指向当前登录用户。
   const expand = p => p.replace(/%([^%]+)%/g, (_, name) => process.env[name] || ('%' + name + '%'));
@@ -38,8 +41,10 @@ function isChild(childPath, parentPath) {
 
 /**
  * 扫描并按应用归类。
+ * 长期-2：改用异步 runScan（本盘扫描可达数十秒，不该占满事件循环）。
+ * @param {Object} [ctx] 任务上下文 { signal, progress }
  */
-function analyze() {
+async function analyze(ctx = {}) {
   const maps = loadMap();
   const user = process.env.USERPROFILE || path.join('C:', 'Users', process.env.USERNAME || 'Default');
   const localAppData = process.env.LOCALAPPDATA || path.join(user, 'AppData', 'Local');
@@ -85,7 +90,7 @@ function analyze() {
   const localDrives = listLocalDrives();
   const dataDrives = localDrives.filter(d => d.toUpperCase() !== sysDrive.toUpperCase());
 
-  const cScan = runScan(sysDrive, cDirsRel, []);
+  const cScan = await runScan(sysDrive, cDirsRel, [], ctx);
   const scans = [cScan];
 
   for (const dDrive of dataDrives) {
@@ -97,7 +102,7 @@ function analyze() {
         return rest.split(/[\\/]/)[0];
       })
       .filter((v, i, a) => v && a.indexOf(v) === i);
-    scans.push(runScan(dDrive, dTop, []));
+    scans.push(await runScan(dDrive, dTop, [], ctx));
   }
 
   const nodes = [];

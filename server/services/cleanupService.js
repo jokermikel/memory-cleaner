@@ -9,19 +9,19 @@
  *   4. 批量上限：一次超过 20 个进程时强制要求显式 acknowledgeBatchLimit=true
  *      （注意：不能用 force 代替——force 只负责「优雅关闭失败后强制结束」）
  *   5. 审计日志：所有清理操作落盘 logs/cleanup-YYYYMMDD.log
- *   6. 效果量化：执行前后各采一次内存快照，算真实释放量
+ *   6. 效果量化：复用计划快照作执行前基线，执行后再采一次，算真实释放量
+ *   7. 树杀闸门：强制结束会连带整棵子树，若子树里出现受保护进程（或子树无法枚举），
+ *      直接拒绝该目标、一个进程都不结束
  */
 
 const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { execFileSync } = require('child_process');
+const { runPsFileAsync } = require('../../lib/psRunner');
+const { appendAudit, LOG_DIR } = require('../../lib/auditLog');
 const { assertDiskIdle } = require('./diskIoGuard');
+const { loadProtected } = require('./riskClassifier');
+const { collector, tmpFile } = require('../../lib/paths');
 
-const WS = path.join(__dirname, '..', '..');
-const CLEANUP_PS1 = path.join(WS, 'server', 'collectors', 'cleanup.ps1');
-const LOG_DIR = path.join(WS, 'logs');
-const TMP_DIR = path.join(os.tmpdir());
+const CLEANUP_PS1 = collector('cleanup.ps1');
 
 const BATCH_LIMIT = 20;
 
@@ -75,10 +75,6 @@ function sumFreedBytes(results) {
   return { freedBytes: freed, succeededCount: succeeded };
 }
 
-function ensureDir(d) {
-  try { fs.mkdirSync(d, { recursive: true }); } catch (e) { }
-}
-
 /** ISO-8601 / Date → Unix 毫秒。PowerShell 5.1 解析带时区的字符串会翻车，数字更稳。 */
 function toUnixMs(v) {
   if (v == null || v === '') return null;
@@ -88,32 +84,54 @@ function toUnixMs(v) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** 写审计日志（追加） */
+/** 写审计日志（追加；实现见 lib/auditLog.js，短期-11 归一） */
 function audit(line) {
-  ensureDir(LOG_DIR);
-  const d = new Date();
-  const ymd = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
-  const file = path.join(LOG_DIR, `cleanup-${ymd}.log`);
-  const ts = d.toISOString();
-  try { fs.appendFileSync(file, `[${ts}] ${line}\n`, 'utf8'); } catch (e) { }
-  return file;
+  return appendAudit('cleanup', line);
 }
 
 /** 读取当前快照（延迟 require 避免循环依赖） */
 function getSnapshot() {
   const { snapshot } = require('./memoryService');
-  return snapshot(true);
+  return snapshot();
 }
 
 /**
- * 规划清理：算出哪些应用/进程会被关闭，以及预计释放量。不做任何实际操作。
- * @param {Object} opts
- * @param {Array<string>} opts.appKeys  要清理的应用 key 列表（不传则取全部 safe 应用）
- * @param {Array<number>} opts.pids     只清理指定 PID（优先于 appKeys）
- * @param {number} [opts.minMb]         只清理占用超过该值的应用
+ * 传给 cleanup.ps1 的「禁止树杀」影像名清单（短期-6）。
+ *
+ * 两个来源合并：
+ *   1. data/protectedProcesses.json 的全部名单（系统关键进程，与词典无关）；
+ *   2. 本次快照里被判为 protected 的应用的进程名 —— 这类分级可能只写在词典里，
+ *      只看名单文件会漏。
+ * 为什么按「名」而不是 PID 传：树杀发生在子进程上，而子进程通常根本不在本次计划里，
+ * 没有可供对照的 PID 记录，只有影像名能在 PowerShell 侧就地判定。
  */
-function plan(opts = {}) {
+function protectedImageNames(snapshot) {
+  const names = new Set();
+  for (const k of loadProtected().keys()) names.add(String(k).toLowerCase());
+  for (const app of (snapshot && snapshot.apps) || []) {
+    if (app.risk !== 'protected') continue;
+    for (const p of app.processes || []) {
+      if (p && p.name) names.add(String(p.name).toLowerCase());
+    }
+  }
+  return [...names];
+}
+
+/**
+ * 生成清理计划，并连同「生成计划时用的那份快照」一起返回。
+ *
+ * 为什么要把快照带出来：原先 plan() 与 execute() 各调用一次 getSnapshot()，
+ * 于是一次真实清理要采三次（plan 内一次、执行前一次、执行后一次），
+ * 每次采集都要起 PowerShell 抓进程与内存，重复且昂贵。
+ * 计划本身就是在「此刻」这份快照上算出来的，执行前的基线直接复用它即可 ——
+ * 同一份数据、同一口径，白省一次全量采集。
+ */
+function planWithSnapshot(opts = {}) {
   const snap = getSnapshot();
+  return { plan: buildPlan(snap, opts), snapshot: snap };
+}
+
+function buildPlan(snap, opts = {}) {
   let targets = snap.apps;
 
   if (Array.isArray(opts.pids) && opts.pids.length) {
@@ -176,6 +194,17 @@ function plan(opts = {}) {
 }
 
 /**
+ * 规划清理：算出哪些应用/进程会被关闭，以及预计释放量。不做任何实际操作。
+ * @param {Object} opts
+ * @param {Array<string>} opts.appKeys  要清理的应用 key 列表（不传则取全部 safe 应用）
+ * @param {Array<number>} opts.pids     只清理指定 PID（优先于 appKeys）
+ * @param {number} [opts.minMb]         只清理占用超过该值的应用
+ */
+function plan(opts = {}) {
+  return planWithSnapshot(opts).plan;
+}
+
+/**
  * 执行清理。
  * @param {Object} opts
  * @param {Array<string>} opts.appKeys
@@ -185,12 +214,18 @@ function plan(opts = {}) {
  * @param {boolean} [opts.confirmed]    是否已确认
  * @param {boolean} [opts.dryRun]       默认 true；传 false 才真执行
  * @param {number}  [opts.minMb]
+ * @param {Object}  [ctx]               任务上下文（长期-2）：{ signal, progress }
  */
-function execute(opts = {}) {
+async function execute(opts = {}, ctx = {}) {
+  const progress = typeof ctx.progress === 'function' ? ctx.progress : () => {};
+  const signal = ctx.signal;
+
   // 默认 dry-run：只有显式 dryRun=false 才真执行
   const dryRun = opts.dryRun !== false;
 
-  const p = plan(opts);
+  // 计划与「执行前的基线快照」共用同一次采集（见 planWithSnapshot 说明）。
+  progress(5, '正在采集快照并生成清理计划');
+  const { plan: p, snapshot: before } = planWithSnapshot(opts);
 
   // 拒绝操作 protected 进程（如果用户显式指定了 protected 应用的 key）
   if (Array.isArray(opts.appKeys) && opts.appKeys.length) {
@@ -231,22 +266,22 @@ function execute(opts = {}) {
   }
 
   const disk = assertDiskIdle();
-  const before = getSnapshot();
+  // 执行前的基线直接复用上面 planWithSnapshot 的那份快照，不再重复采集。
 
-  const targetsFile = path.join(TMP_DIR, `cc_cleanup_targets_${Date.now()}.json`);
-  const resultFile = path.join(TMP_DIR, `cc_cleanup_result_${Date.now()}.json`);
+  const targetsFile = tmpFile(`cc_cleanup_targets_${Date.now()}.json`);
+  const resultFile = tmpFile(`cc_cleanup_result_${Date.now()}.json`);
   fs.writeFileSync(targetsFile, JSON.stringify(procs), 'utf8');
 
   try {
-    const args = [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', CLEANUP_PS1,
-      '-TargetsFile', targetsFile, '-ResultFile', resultFile
-    ];
-    if (opts.force) args.push('-Force');
-
-    execFileSync('powershell.exe', args, {
-      encoding: 'utf8', timeout: 120000, windowsHide: true, maxBuffer: 16 * 1024 * 1024
-    });
+    // force 为 true 时拼成裸开关 -Force；受保护影像名（短期-6）只在真会用到 /T 的分支传。
+    progress(40, `正在关闭 ${procs.length} 个进程`);
+    // 长期-2：改用 execFile（异步），事件循环不再被占满；signal 透传给子进程，取消即杀。
+    await runPsFileAsync(CLEANUP_PS1, {
+      TargetsFile: targetsFile,
+      ResultFile: resultFile,
+      Force: !!opts.force,
+      ProtectedNames: opts.force ? protectedImageNames(before) : null
+    }, { timeout: 120000, maxBuffer: 16 * 1024 * 1024, signal });
 
     let results = [];
     let parseIssue = null;
@@ -269,6 +304,7 @@ function execute(opts = {}) {
     }
 
     // 等系统回收内存再采一次
+    progress(80, '正在采集执行后快照');
     const after = getSnapshot();
 
     const succeeded = results.filter(r => r.ok);
@@ -279,6 +315,7 @@ function execute(opts = {}) {
     const systemDeltaBytes = Math.max(0, before.system.usedBytes - after.system.usedBytes);
 
     // 失败原因归类，便于用户判断（尤其服务进程需要管理员权限）
+    progress(98, '正在汇总结果');
     const failReasons = {};
     for (const r of results) {
       if (r.ok) continue;
@@ -325,4 +362,4 @@ function execute(opts = {}) {
   }
 }
 
-module.exports = { plan, execute, assertBatchAllowed, sumFreedBytes, BATCH_LIMIT, LOG_DIR };
+module.exports = { plan, execute, assertBatchAllowed, sumFreedBytes, protectedImageNames, BATCH_LIMIT, LOG_DIR };

@@ -4,11 +4,12 @@
  * 去重规则：若 A 是 B 的父目录，只保留更具体的那条（子路径），父路径扣掉子路径的字节数。
  */
 
-const fs = require('fs');
 const path = require('path');
 const { runScan } = require('../collectors/diskSpace');
+const { loadJsonCached } = require('../../lib/dictCache');
+const { data } = require('../../lib/paths');
 
-const DICT_PATH = path.join(__dirname, '..', '..', 'data', 'junkDict.zh.json');
+const DICT_PATH = data('junkDict.zh.json');
 
 /**
  * 传给 diskScan.ps1 -TopDirs 的哨兵值。
@@ -22,8 +23,10 @@ const DICT_PATH = path.join(__dirname, '..', '..', 'data', 'junkDict.zh.json');
  */
 const NO_TOP_DIR_SENTINEL = '__cc_no_top_dirs__';
 
+// 词典在热路径上（每次扫描垃圾都读一遍），按文件状态缓存，见 lib/dictCache.js。
+// 返回对象只读：locate() 只遍历 entries，不改写。
 function loadDict() {
-  return JSON.parse(fs.readFileSync(DICT_PATH, 'utf8'));
+  return loadJsonCached(DICT_PATH);
 }
 
 function expand(p) {
@@ -39,8 +42,10 @@ function isSubPath(child, parent) {
 
 /**
  * 扫描词典中所有路径，返回分类后的垃圾清单。
+ * 长期-2：改用异步 runScan（robocopy 量算全盘垃圾本机约 4 秒，不该占满事件循环）。
+ * @param {Object} [ctx] 任务上下文 { signal, progress }
  */
-function locate() {
+async function locate(ctx = {}) {
   const dict = loadDict();
   const entries = dict.entries || [];
   const { listLocalDrives } = require('../collectors/diskSpace');
@@ -77,7 +82,7 @@ function locate() {
   //       传一个几乎不可能存在的名字则只会尝试量算这一个目录，成本可忽略。
   //       本函数只需要 junkPaths，不需要任何 topDirs 数据。
   const junkList = pathSet.map(x => x.original);
-  const scanned = runScan(sysDrive, [NO_TOP_DIR_SENTINEL], junkList);
+  const scanned = await runScan(sysDrive, [NO_TOP_DIR_SENTINEL], junkList, ctx);
 
   const byExpanded = new Map();
   for (const j of scanned.junkPaths || []) {

@@ -7,7 +7,7 @@
  * 本模块只读公开性能计数器，不碰任何未公开 API。
  */
 
-const { execFileSync } = require('child_process');
+const { runPsCommand } = require('../../lib/psRunner');
 
 const DEFAULT_BYTES_PER_SEC = 20 * 1024 * 1024; // 20 MB/s
 const DEFAULT_QUEUE = 3;
@@ -33,9 +33,7 @@ function sampleDiskIo() {
     '"$bytes|$q"'
   ].join('; ');
   try {
-    const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', ps], {
-      encoding: 'utf8', windowsHide: true, timeout: 15000
-    });
+    const out = runPsCommand(ps, { timeout: 15000 });
     const sample = parseSample(out);
     const flag = isBusy(sample);
     return { ...sample, ...flag, ok: true };

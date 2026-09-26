@@ -13,8 +13,8 @@ const { classifyAll } = require('./riskClassifier');
  * 采集一次完整内存快照。
  * @returns {{system:Object, apps:Array, totalBytes:number, groupedBytes:number, conserved:boolean, processCount:number, accessLimitedCount:number, collectedAt:string}}
  */
-function snapshot(includeServices = true) {
-  const { processes, snapshot: snap } = collectProcesses(includeServices);
+function snapshot() {
+  const { processes, snapshot: snap } = collectProcesses();
   const system = buildSystemMemory(snap);
   const grouped = groupApps(processes);
 

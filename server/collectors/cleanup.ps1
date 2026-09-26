@@ -11,7 +11,11 @@ param(
   [Parameter(Mandatory=$true)][string]$TargetsFile,
   [Parameter(Mandatory=$true)][string]$ResultFile,
   [int]$GraceMs = 4000,
-  [switch]$Force
+  [switch]$Force,
+  # Semicolon-separated image names (no .exe) that must never be ended as part
+  # of a descendant tree. Supplied by cleanupService from protectedProcesses.json
+  # plus every app graded protected in the current snapshot.
+  [string]$ProtectedNames = ''
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -91,6 +95,58 @@ function Invoke-Taskkill($targetPid) {
   }
 }
 
+# Build "parent pid -> direct children" once per run, so the tree guard below
+# does not spawn one query per target.
+# Returns $null when the process table cannot be read at all: the caller must
+# then treat the tree as unverifiable and refuse (fail closed).
+function Get-ChildIndex {
+  $procs = @()
+  try {
+    $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  } catch {
+    return $null
+  }
+  if ($procs.Count -eq 0) { return $null }
+  $index = @{}
+  foreach ($pr in $procs) {
+    if ($null -eq $pr) { continue }
+    $key = [int]$pr.ParentProcessId
+    if (-not $index.ContainsKey($key)) { $index[$key] = New-Object System.Collections.ArrayList }
+    $nm = ([string]$pr.Name) -replace '\.exe$', ''
+    [void]$index[$key].Add([pscustomobject]@{ pid = [int]$pr.ProcessId; name = $nm })
+  }
+  return $index
+}
+
+# Descendants of $RootPid that must not be ended: kernel/system PIDs and any
+# image name in $ProtectedSet. Returns @{ failed = bool; hits = string[] }.
+# failed = $true means the descendant set could not be computed.
+function Get-TreeHits($childIndex, [int]$RootPid, $ProtectedSet) {
+  if ($null -eq $childIndex) { return @{ failed = $true; hits = @() } }
+  $hits = New-Object System.Collections.ArrayList
+  $seen = @{}
+  $seen[$RootPid] = $true
+  $queue = New-Object System.Collections.ArrayList
+  if ($childIndex.ContainsKey($RootPid)) {
+    foreach ($c in $childIndex[$RootPid]) { [void]$queue.Add($c) }
+  }
+  while ($queue.Count -gt 0) {
+    $cur = $queue[0]
+    $queue.RemoveAt(0)
+    if ($seen.ContainsKey($cur.pid)) { continue }
+    $seen[$cur.pid] = $true
+    if ([int]$cur.pid -le 4) { [void]$hits.Add('pid:' + [string]$cur.pid); continue }
+    if ($ProtectedSet.Contains(([string]$cur.name).ToLowerInvariant())) {
+      [void]$hits.Add([string]$cur.name)
+      continue
+    }
+    if ($childIndex.ContainsKey($cur.pid)) {
+      foreach ($g in $childIndex[$cur.pid]) { [void]$queue.Add($g) }
+    }
+  }
+  return @{ failed = $false; hits = @($hits.ToArray()) }
+}
+
 $raw = [System.IO.File]::ReadAllText($TargetsFile, [System.Text.Encoding]::UTF8)
 $targets = @()
 $parseError = $null
@@ -135,6 +191,20 @@ $targets = @($targets | Sort-Object @{
 # user process and must never be killed by the directory sweep below.
 $sweepStartMs = Get-UnixMs (Get-Date)
 
+# Tree-kill guard state. Only built when force-killing, because the tree is
+# only ended by `taskkill /T` in that branch.
+$protectedSet = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($pn in ([string]$ProtectedNames).Split(';')) {
+  $norm = ([string]$pn).Trim().ToLowerInvariant()
+  if ($norm) { [void]$protectedSet.Add($norm) }
+}
+$childIndex = $null
+$treeGuardActive = $false
+if ($Force) {
+  $treeGuardActive = $true
+  $childIndex = Get-ChildIndex
+}
+
 foreach ($t in $targets) {
   $entry = New-Entry $t.pid $t.name
   $targetPid = [int]$t.pid
@@ -170,6 +240,27 @@ foreach ($t in $targets) {
     continue
   }
   $entry.verified = [bool]$reuse.verified
+
+  # Tree-kill guard: `taskkill /T` ends the whole descendant tree without
+  # consulting each child's own risk grade. If any descendant is a protected
+  # system process -- or the descendant set cannot be established -- refuse this
+  # target entirely and touch nothing, the same fail-closed stance used above
+  # for unverifiable PID identity. Checked before the graceful close so that
+  # "refused" really means no process of this target was ended.
+  if ($treeGuardActive) {
+    $tree = Get-TreeHits $childIndex $targetPid $protectedSet
+    if ($tree.failed) {
+      $entry.error = 'tree_check_failed'
+      [void]$results.Add($entry)
+      continue
+    }
+    if (@($tree.hits).Count -gt 0) {
+      $entry.error = 'tree_contains_protected'
+      $entry.treeProtected = @($tree.hits)
+      [void]$results.Add($entry)
+      continue
+    }
+  }
 
   $gracefulSent = $false
   try {
@@ -256,7 +347,11 @@ if ($Force -and $targets.Count -gt 0) {
         $pl = $ppath.ToLowerInvariant()
         $sameTree = $false
         foreach ($pre in $prefixes) {
-          if ($pl.StartsWith($pre)) { $sameTree = $true; break }
+          # Match only at a directory boundary. A bare StartsWith() would let
+          # 'c:\app' match 'c:\app-other\run.exe' and kill an unrelated program.
+          $withSep = $pre
+          if (-not $withSep.EndsWith('\')) { $withSep = $withSep + '\' }
+          if ($pl.StartsWith($withSep) -or $pl -eq $pre) { $sameTree = $true; break }
         }
         if (-not $sameTree) { continue }
         # BUG-1 fix: only sweep a process that started at/after this run began.

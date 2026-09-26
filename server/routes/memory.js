@@ -15,6 +15,8 @@ const { status: privilegeStatus, elevate } = require('../services/privilegeServi
 const { plan: trimPlan, execute: trimExecute } = require('../services/workingSetService');
 const { sampleDiskIo } = require('../services/diskIoGuard');
 const cacheMigrate = require('../services/cacheMigrateService');
+// 长任务注册表（长期-2）：进度/取消/超时/单飞的唯一实现
+const tasks = require('../../lib/tasks');
 
 /** 参数校验：把字符串解析为正整数，非法返回 null */
 function parseIntParam(v, min = 0, max = Number.MAX_SAFE_INTEGER) {
@@ -46,6 +48,26 @@ function enumParam(v, allowed, fallback) {
   return allowed.includes(v) ? v : fallback;
 }
 
+/**
+ * 列表分页的**唯一实现**（短期-14 / U4）。
+ *
+ * 为什么要有这个函数：原先「一页多少条、一共多少条」在两层各说各话 ——
+ * 服务端只有一句上限 500 的 limit 夹取（有的接口连 offset 都没有），前端又自行
+ * slice 出一页并自称「显示全部 N 个」。于是同一份列表可以出现两个互相矛盾的总数。
+ * 现在分页只归服务端：响应里固定带上 total（过滤/排序后的总数）、offset、limit、
+ * count（本页条数），前端只负责把 count/total 原样念给用户，不再自己算口径。
+ *
+ * limit 缺省（不传/非法）= 不分页，返回全部；超出上限一律**夹到上限**而不是退回全部
+ * （否则 `?limit=999999` 反而拿到全量列表，「上限」形同虚设，见 M-07）。
+ */
+function pageOf(list, query) {
+  const limit = clampIntParam(query.limit, 1, MAX_LIST_LIMIT);
+  const offset = clampIntParam(query.offset, 0, MAX_LIST_OFFSET) || 0;
+  const total = list.length;
+  const items = limit ? list.slice(offset, offset + limit) : list.slice(offset);
+  return { total, offset, limit: limit || null, count: items.length, items };
+}
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -61,15 +83,126 @@ function sendError(res, status, code, message, detail) {
 }
 
 /**
+ * 异步 handler 的统一兜底（Q3）。
+ *
+ * 异步 handler 内部已经有 try/catch，但「函数体被完整包裹」是一条只能靠人守的
+ * 不变量：任何一处漏掉，游离的 Promise 拒绝在 Node ≥15 会让**整个服务进程退出**。
+ * 这里统一兜住，并保证每个请求最多发送一次响应（已发出响应就只吞掉异常）。
+ */
+function guardAsync(promise, res, code, message) {
+  Promise.resolve(promise).catch((e) => {
+    try {
+      if (!res.headersSent) sendError(res, 500, code, message, e && e.message);
+    } catch (err) { /* 响应已断开，忽略 */ }
+  });
+}
+
+/**
+ * 长任务统一入口（长期-2）。
+ *
+ * 背景见 lib/tasks.js 文件头：磁盘扫描 30~60 秒、磁盘清理可达数分钟，原先这些活儿
+ * 都在请求线程上同步跑，事件循环被占满 —— 期间连 /api/health 都不响应，操作也没法取消。
+ *
+ * 现在的形态：
+ *   - 活儿登记进 lib/tasks.js 的任务表（可在 GET /api/jobs 看到进度）
+ *   - 同 key 只允许一个在飞，后到的请求立刻拿到 409（这就是 短期-2 的终解，
+ *     替代原先那个「完成后 1 秒冷却窗」的权宜之计）
+ *   - 客户端可 POST /api/jobs/:id/cancel 取消，signal 会连带杀掉 PowerShell 子进程
+ *   - **响应形状刻意保持不变**（成功仍是 200 + 原来的 JSON），既有 173 条 e2e 依赖它
+ *
+ * @param {string} key       单飞键
+ * @param {Object} opts      { kind, label, timeoutMs, failCode, failMessage }
+ * @param {Function} runner  async (ctx) => data
+ * @param {Function} [onError] 业务错误码映射（任务契约之外的码由它处理）
+ */
+async function runTask(res, key, opts, runner, onError) {
+  try {
+    const data = await tasks.startExclusive(key, runner, opts);
+    if (!res.headersSent) sendJson(res, 200, data);
+  } catch (e) {
+    if (res.headersSent) return;
+    if (sendTaskError(res, e)) return;
+    if (onError) return onError(e);
+    sendError(res, 500, opts.failCode || 'TASK_FAILED', opts.failMessage || '任务执行失败', e && e.message);
+  }
+}
+
+/**
+ * 任务错误码 → HTTP 状态。lib/tasks.js 的「传输契约」在路由层落地，
+ * 调用点不得各自解释（否则同一个 TASK_BUSY 在三个接口会有三种状态码与文案）。
+ */
+const TASK_ERROR_STATUS = {
+  TASK_TIMEOUT: 504,
+  TASK_CANCELLED: 409,
+  TASK_BUSY: 409,
+  TASK_NOT_FOUND: 404,
+  TASK_NOT_RUNNING: 409
+};
+
+/** @returns {boolean} true 表示已按任务契约发出响应 */
+function sendTaskError(res, e) {
+  const status = TASK_ERROR_STATUS[e && e.code];
+  if (!status) return false;
+  sendError(res, status, e.code, e.message, e.job ? { job: e.job } : null);
+  return true;
+}
+
+/**
+ * GET /api/jobs
+ * 任务列表：在飞的排前面，其余按完成时间倒序。前端据此显示进度与「取消」按钮。
+ */
+function handleJobsList(query, res) {
+  const list = tasks.list();
+  if (query.id) {
+    const one = tasks.get(String(query.id));
+    if (!one) return sendError(res, 404, 'TASK_NOT_FOUND', '任务不存在或已超出保留范围');
+    return sendJson(res, 200, { job: one });
+  }
+  sendJson(res, 200, { jobs: list, running: list.filter(j => j.state === 'running').length });
+}
+
+/**
+ * GET /api/jobs/:id
+ * 单个任务的进度快照。
+ */
+function handleJobDetail(res, id) {
+  const job = tasks.get(id);
+  if (!job) return sendError(res, 404, 'TASK_NOT_FOUND', '任务不存在或已超出保留范围');
+  sendJson(res, 200, { job });
+}
+
+/**
+ * POST /api/jobs/:id/cancel
+ * 取消在飞任务。取消会把 AbortSignal 传到底层 execFile，连带杀掉 PowerShell 子进程。
+ */
+function handleJobCancel(req, res, id) {
+  if (req.method !== 'POST') {
+    return sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
+  }
+  try {
+    sendJson(res, 202, { job: tasks.cancel(id) });
+  } catch (e) {
+    if (sendTaskError(res, e)) return;
+    sendError(res, 500, 'TASK_CANCEL_FAILED', '取消任务失败', e.message);
+  }
+}
+
+/**
  * GET /api/memory/snapshot
  * 完整内存快照：系统 + 应用排行 + 守恒校验。
  * 支持 ?limit=N（返回前 N 个应用，默认全部）
  */
 function handleSnapshot(query, res) {
   try {
-    const data = snapshot(true);
-    const limit = clampIntParam(query.limit, 1, MAX_LIST_LIMIT);
-    if (limit) data.apps = data.apps.slice(0, limit);
+    const data = snapshot();
+    // 分页口径与服务端其它列表接口一致（见 pageOf）：apps 是列表，元数据带 apps 前缀，
+    // 避免与「应用数」这类同名字段混淆。
+    const page = pageOf(data.apps, query);
+    data.apps = page.items;
+    data.appsTotal = page.total;
+    data.appsOffset = page.offset;
+    data.appsLimit = page.limit;
+    data.appsCount = page.count;
     sendJson(res, 200, data);
   } catch (e) {
     sendError(res, 500, 'SNAPSHOT_FAILED', '内存快照采集失败', e.message);
@@ -82,7 +215,7 @@ function handleSnapshot(query, res) {
  */
 function handleSystem(query, res) {
   try {
-    const data = snapshot(false);
+    const data = snapshot();
     sendJson(res, 200, data.system);
   } catch (e) {
     sendError(res, 500, 'SYSTEM_FAILED', '系统内存采集失败', e.message);
@@ -96,7 +229,7 @@ function handleSystem(query, res) {
  */
 function handleApps(query, res) {
   try {
-    const data = snapshot(true);
+    const data = snapshot();
     let apps = data.apps;
 
     // 过滤
@@ -118,17 +251,15 @@ function handleApps(query, res) {
     if (sort === 'name') apps = [...apps].sort((a, b) => a.name.localeCompare(b.name, 'zh'));
     // 默认已按内存降序（groupApps 已排）
 
-    // 分页（超上限一律夹到上限，避免「超限 = 返回全部」的反向退化）
-    const limit = clampIntParam(query.limit, 1, MAX_LIST_LIMIT);
-    const offset = clampIntParam(query.offset, 0, MAX_LIST_OFFSET) || 0;
-    const total = apps.length;
-    const sliced = limit ? apps.slice(offset, offset + limit) : apps.slice(offset);
+    // 分页：见 pageOf（服务端是分页的唯一归属层）
+    const page = pageOf(apps, query);
 
     sendJson(res, 200, {
-      total,
-      offset,
-      count: sliced.length,
-      apps: sliced,
+      total: page.total,
+      offset: page.offset,
+      limit: page.limit,
+      count: page.count,
+      apps: page.items,
       totalBytes: data.totalBytes,
       groupedBytes: data.groupedBytes,
       conserved: data.conserved,
@@ -147,7 +278,7 @@ function handleApps(query, res) {
 function handleProcesses(query, res) {
   try {
     const { collectProcesses } = require('../collectors/processList');
-    const { processes } = collectProcesses(false);
+    const { processes } = collectProcesses();
     let list = processes;
 
     const q = query.q;
@@ -156,11 +287,9 @@ function handleProcesses(query, res) {
       list = list.filter(p => p.name.toLowerCase().includes(kw));
     }
 
-    const limit = clampIntParam(query.limit, 1, MAX_LIST_LIMIT);
-    const total = list.length;
-    const sliced = limit ? list.slice(0, limit) : list;
-
-    sendJson(res, 200, { total, count: sliced.length, processes: sliced });
+    // 分页：见 pageOf（此前只有 limit、没有 offset，与 /api/memory/apps 语义不一致）
+    const page = pageOf(list, query);
+    sendJson(res, 200, { total: page.total, offset: page.offset, limit: page.limit, count: page.count, processes: page.items });
   } catch (e) {
     sendError(res, 500, 'PROCESSES_FAILED', '进程明细采集失败', e.message);
   }
@@ -231,18 +360,18 @@ async function handleCleanupExecute(req, res) {
     return sendError(res, 400, 'BAD_BODY', '请求体解析失败', e.message);
   }
 
-  try {
-    const result = execute({
-      appKeys: Array.isArray(body.appKeys) ? body.appKeys : undefined,
-      pids: Array.isArray(body.pids) ? body.pids : undefined,
-      force: body.force === true,
-      acknowledgeBatchLimit: body.acknowledgeBatchLimit === true,
-      confirmed: body.confirmed === true,
-      dryRun: body.dryRun !== false,
-      minMb: Number.isFinite(body.minMb) ? body.minMb : 0
-    });
-    sendJson(res, 200, result);
-  } catch (e) {
+  return runTask(res, 'cleanup-execute', {
+    kind: 'cleanup', label: '关闭进程清理内存', timeoutMs: 300000,
+    failCode: 'CLEANUP_FAILED', failMessage: '清理执行失败'
+  }, (ctx) => execute({
+    appKeys: Array.isArray(body.appKeys) ? body.appKeys : undefined,
+    pids: Array.isArray(body.pids) ? body.pids : undefined,
+    force: body.force === true,
+    acknowledgeBatchLimit: body.acknowledgeBatchLimit === true,
+    confirmed: body.confirmed === true,
+    dryRun: body.dryRun !== false,
+    minMb: Number.isFinite(body.minMb) ? body.minMb : 0
+  }, ctx), (e) => {
     if (e.code === 'PROTECTED_TARGET') {
       return sendError(res, 403, 'PROTECTED_TARGET', e.message, { blocked: e.blocked });
     }
@@ -253,7 +382,7 @@ async function handleCleanupExecute(req, res) {
       return sendError(res, 409, 'DISK_BUSY', e.message, e.sample || null);
     }
     sendError(res, 500, 'CLEANUP_FAILED', '清理执行失败', e.message);
-  }
+  });
 }
 
 /**
@@ -284,16 +413,16 @@ async function handleTrimExecute(req, res) {
   } catch (e) {
     return sendError(res, 400, 'BAD_BODY', '请求体解析失败', e.message);
   }
-  try {
-    const result = trimExecute({
-      appKeys: Array.isArray(body.appKeys) ? body.appKeys : undefined,
-      pids: Array.isArray(body.pids) ? body.pids : undefined,
-      confirmed: body.confirmed === true,
-      dryRun: body.dryRun !== false,
-      minMb: Number.isFinite(body.minMb) ? body.minMb : 0
-    });
-    sendJson(res, 200, result);
-  } catch (e) {
+  return runTask(res, 'trim-execute', {
+    kind: 'trim', label: '修剪进程工作集', timeoutMs: 300000,
+    failCode: 'TRIM_FAILED', failMessage: '工作集修剪失败'
+  }, (ctx) => trimExecute({
+    appKeys: Array.isArray(body.appKeys) ? body.appKeys : undefined,
+    pids: Array.isArray(body.pids) ? body.pids : undefined,
+    confirmed: body.confirmed === true,
+    dryRun: body.dryRun !== false,
+    minMb: Number.isFinite(body.minMb) ? body.minMb : 0
+  }, ctx), (e) => {
     if (e.code === 'PROTECTED_TARGET') {
       return sendError(res, 403, 'PROTECTED_TARGET', e.message, { blocked: e.blocked });
     }
@@ -304,7 +433,7 @@ async function handleTrimExecute(req, res) {
       return sendError(res, 409, 'DISK_BUSY', e.message, e.sample || null);
     }
     sendError(res, 500, 'TRIM_FAILED', '工作集修剪失败', e.message);
-  }
+  });
 }
 
 async function handleMigratePresets(query, res) {
@@ -428,6 +557,21 @@ async function handleMigrateExecute(req, res) {
 }
 
 function handleMemoryRoutes(req, res, pathname, query) {
+  // ───── 长任务接口（长期-2）─────
+  // 前缀匹配，不走下面的精确 switch（switch 是 O(1) 但表达不了 /api/jobs/:id 这类路径）
+  if (pathname === '/api/jobs') {
+    handleJobsList(query, res);
+    return true;
+  }
+  const jobMatch = /^\/api\/jobs\/([^/]+)(\/cancel)?$/.exec(pathname);
+  if (jobMatch) {
+    let id = jobMatch[1];
+    try { id = decodeURIComponent(id); } catch (e) { /* 保持原样，查不到就是 404 */ }
+    if (jobMatch[2]) handleJobCancel(req, res, id);
+    else handleJobDetail(res, id);
+    return true;
+  }
+
   switch (pathname) {
     case '/api/memory/snapshot':
       handleSnapshot(query, res);
@@ -455,17 +599,11 @@ function handleMemoryRoutes(req, res, pathname, query) {
         sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
         return true;
       }
-      handleTrimExecute(req, res);
+      guardAsync(handleTrimExecute(req, res), res, 'TRIM_FAILED', '工作集修剪失败');
       return true;
     case '/api/disk/migrate/presets':
-      // 评估为异步（H5 占用抽样并发执行）：补 catch 兜底，避免未处理的 Promise 拒绝
-      handleMigratePresets(query, res).catch((e) => {
-        try {
-          if (!res.headersSent) {
-            sendError(res, 500, 'MIGRATE_PRESETS_FAILED', '读取可迁移缓存清单失败', e && e.message);
-          }
-        } catch (err) { /* 响应已断开，忽略 */ }
-      });
+      // 评估为异步（H5 占用抽样并发执行）：统一走 guardAsync 兜底
+      guardAsync(handleMigratePresets(query, res), res, 'MIGRATE_PRESETS_FAILED', '读取可迁移缓存清单失败');
       return true;
     case '/api/disk/migrate/inspect':
       handleMigrateInspect(query, res);
@@ -475,13 +613,7 @@ function handleMemoryRoutes(req, res, pathname, query) {
         sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
         return true;
       }
-      handleMigrateRollback(req, res).catch((e) => {
-        try {
-          if (!res.headersSent) {
-            sendError(res, 500, 'ROLLBACK_FAILED', '撤销迁移失败', e && e.message);
-          }
-        } catch (err) { /* 响应已断开，忽略 */ }
-      });
+      guardAsync(handleMigrateRollback(req, res), res, 'ROLLBACK_FAILED', '撤销迁移失败');
       return true;
     case '/api/disk/migrate/records':
       handleMigrateRecords(query, res);
@@ -491,50 +623,44 @@ function handleMemoryRoutes(req, res, pathname, query) {
         sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
         return true;
       }
-      handleMigratePrecheck(req, res);
+      guardAsync(handleMigratePrecheck(req, res), res, 'PRECHECK_FAILED', '迁移预检失败');
       return true;
     case '/api/disk/migrate/execute':
       if (req.method !== 'POST') {
         sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
         return true;
       }
-      // execute 为异步：补 catch 兜底，避免未处理的 Promise 拒绝
-      handleMigrateExecute(req, res).catch((e) => {
-        try {
-          if (!res.headersSent) {
-            sendError(res, 500, 'MIGRATE_FAILED', '缓存迁移失败', e && e.message);
-          }
-        } catch (err) { /* 响应已断开，忽略 */ }
-      });
+      // execute 为异步：统一走 guardAsync 兜底
+      guardAsync(handleMigrateExecute(req, res), res, 'MIGRATE_FAILED', '缓存迁移失败');
       return true;
     case '/api/cleanup/execute':
       if (req.method !== 'POST') {
         sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
         return true;
       }
-      handleCleanupExecute(req, res);
+      guardAsync(handleCleanupExecute(req, res), res, 'CLEANUP_FAILED', '清理执行失败');
       return true;
     case '/api/disk/volumes':
       handleDiskVolumes(query, res);
       return true;
     case '/api/disk/snapshot':
-      handleDiskSnapshot(query, res);
+      handleDiskSnapshot(req, res);
       return true;
     case '/api/disk/junk':
-      handleDiskJunk(query, res);
+      handleDiskJunk(req, res);
       return true;
     case '/api/disk/apps':
-      handleDiskApps(query, res);
+      handleDiskApps(req, res, query);
       return true;
     case '/api/disk/cleanup/plan':
-      handleDiskCleanupPlan(query, res);
+      handleDiskCleanupPlan(req, res);
       return true;
     case '/api/disk/cleanup/execute':
       if (req.method !== 'POST') {
         sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
         return true;
       }
-      handleDiskCleanupExecute(req, res);
+      guardAsync(handleDiskCleanupExecute(req, res), res, 'DISK_CLEANUP_FAILED', '磁盘清理失败');
       return true;
     case '/api/privilege/status':
       handlePrivilegeStatus(query, res);
@@ -544,7 +670,7 @@ function handleMemoryRoutes(req, res, pathname, query) {
         sendError(res, 405, 'METHOD_NOT_ALLOWED', '该接口只接受 POST');
         return true;
       }
-      handlePrivilegeElevate(req, res);
+      guardAsync(handlePrivilegeElevate(req, res), res, 'ELEVATE_FAILED', '提升权限失败');
       return true;
     default:
       return false;
@@ -552,8 +678,8 @@ function handleMemoryRoutes(req, res, pathname, query) {
 }
 
 /**
- * GET /api/disk/snapshot
- * C/D 盘占用快照（一级目录 + 已知垃圾路径）。扫描约 30~60 秒。
+ * GET /api/disk/volumes
+ * 分区概览（Win32_LogicalDisk，毫秒级，不走任务）。
  */
 function handleDiskVolumes(query, res) {
   try {
@@ -563,48 +689,62 @@ function handleDiskVolumes(query, res) {
   }
 }
 
-function handleDiskSnapshot(query, res) {
-  try {
-    const data = diskSnapshot();
-    sendJson(res, 200, data);
-  } catch (e) {
-    sendError(res, 500, 'DISK_SCAN_FAILED', '磁盘扫描失败', e.message);
-  }
+/**
+ * GET /api/disk/snapshot
+ * C/D 盘占用快照（一级目录 + 已知垃圾路径）。扫描约 30~60 秒。
+ *
+ * 长期-2：改为长任务。响应形状不变（仍 200 + 原 JSON），但扫描期间服务可响应，
+ * 且可在 GET /api/jobs 看到进度、POST /api/jobs/:id/cancel 取消。
+ */
+function handleDiskSnapshot(req, res) {
+  guardAsync(runTask(res, 'disk-snapshot', {
+    kind: 'disk-snapshot', label: '磁盘占用快照', timeoutMs: 600000,
+    failCode: 'DISK_SCAN_FAILED', failMessage: '磁盘扫描失败'
+  }, (ctx) => diskSnapshot(ctx)), res, 'DISK_SCAN_FAILED', '磁盘扫描失败');
 }
 
 /**
  * GET /api/disk/junk
  * 按词典分类的可清理垃圾清单（已去重）。约 3 秒。
  */
-function handleDiskJunk(query, res) {
-  try {
-    const data = locate();
-    sendJson(res, 200, data);
-  } catch (e) {
-    sendError(res, 500, 'JUNK_SCAN_FAILED', '垃圾定位失败', e.message);
-  }
+function handleDiskJunk(req, res) {
+  guardAsync(runTask(res, 'disk-junk', {
+    kind: 'disk-junk', label: '垃圾清单', timeoutMs: 180000,
+    failCode: 'JUNK_SCAN_FAILED', failMessage: '垃圾定位失败'
+  }, (ctx) => locate(ctx)), res, 'JUNK_SCAN_FAILED', '垃圾定位失败');
 }
 
 /**
  * GET /api/disk/apps
  * C/D 盘按应用归类的空间占用。扫描约 30~60 秒。
+ * 支持 ?limit=N&offset=N —— 分页口径与内存侧列表一致（见 pageOf）。
  */
-function handleDiskApps(query, res) {
-  try {
-    const data = analyze();
-    sendJson(res, 200, data);
-  } catch (e) {
-    sendError(res, 500, 'DISK_ANALYZE_FAILED', '磁盘应用归类失败', e.message);
-  }
+function handleDiskApps(req, res, query) {
+  guardAsync(runTask(res, 'disk-apps', {
+    kind: 'disk-apps', label: '磁盘应用归类', timeoutMs: 600000,
+    failCode: 'DISK_ANALYZE_FAILED', failMessage: '磁盘应用归类失败'
+  }, async (ctx) => {
+    const data = await analyze(ctx);
+    const page = pageOf(data.apps || [], query);
+    return Object.assign({}, data, {
+      apps: page.items,
+      total: page.total,
+      offset: page.offset,
+      limit: page.limit,
+      count: page.count
+    });
+  }), res, 'DISK_ANALYZE_FAILED', '磁盘应用归类失败');
 }
 
-function handleDiskCleanupPlan(query, res) {
-  try {
-    const data = diskPlan();
-    sendJson(res, 200, data);
-  } catch (e) {
-    sendError(res, 500, 'DISK_PLAN_FAILED', '生成磁盘清理计划失败', e.message);
-  }
+/**
+ * GET /api/disk/cleanup/plan
+ * 磁盘垃圾清理计划（dry-run）。内部要跑一次 robocopy 量算（数秒级），同样任务化。
+ */
+function handleDiskCleanupPlan(req, res) {
+  guardAsync(runTask(res, 'disk-cleanup-plan', {
+    kind: 'disk-cleanup-plan', label: '磁盘清理计划', timeoutMs: 180000,
+    failCode: 'DISK_PLAN_FAILED', failMessage: '生成磁盘清理计划失败'
+  }, (ctx) => diskPlan({}, ctx)), res, 'DISK_PLAN_FAILED', '生成磁盘清理计划失败');
 }
 
 /**
@@ -655,19 +795,19 @@ async function handleDiskCleanupExecute(req, res) {
   } catch (e) {
     return sendError(res, 400, 'BAD_BODY', '请求体解析失败', e.message);
   }
-  try {
-    const result = diskExecute({
-      ids: Array.isArray(body.ids) ? body.ids : undefined,
-      dryRun: body.dryRun !== false,
-      confirmed: body.confirmed === true
-    });
-    sendJson(res, 200, result);
-  } catch (e) {
+  return runTask(res, 'disk-cleanup-execute', {
+    kind: 'disk-cleanup', label: '删除磁盘垃圾', timeoutMs: 1800000,
+    failCode: 'DISK_CLEANUP_FAILED', failMessage: '磁盘清理失败'
+  }, (ctx) => diskExecute({
+    ids: Array.isArray(body.ids) ? body.ids : undefined,
+    dryRun: body.dryRun !== false,
+    confirmed: body.confirmed === true
+  }, ctx), (e) => {
     if (e.code === 'NOT_CONFIRMED' || e.code === 'CAUTION_NOT_EXPLICIT') {
       return sendError(res, 400, e.code, e.message);
     }
     sendError(res, 500, 'DISK_CLEANUP_FAILED', '磁盘清理失败', e.message);
-  }
+  });
 }
 
 module.exports = { handleMemoryRoutes };
