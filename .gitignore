@@ -17,6 +17,12 @@ README.old.md
 PROGRESS.md
 内存清理应用_实施计划.md
 磁盘清理模块_实施计划.md
+# 本轮全量分析、执行计划与安全复审报告：含本机绝对路径与真实进程/路径细节，
+# 与 最终测试报告.md / 改动清单_实施总账.md 不同——那两份是面向仓库的结论，
+# 这三份是定位到本机现场的原始过程材料，一律不上传。
+建议.md
+下一步.md
+项目安全与质量复审报告_20260924_修正版.md
 
 # ── 依赖与缓存 ──
 node_modules/
@@ -32,20 +38,35 @@ data/cache-migrations.json
 自测结果.md
 测试.md
 
-# ── 单元测试脚手架（开发者本地运行，不上传）──
-# 测试结论见仓库根目录的「最终测试报告.md」；测试代码含本机路径/进程名等环境细节
-server/services/__tests__/
+# ── 单元测试：脱敏后随仓库分发（长期-1）──
+# server/services/__tests__/ 是「基于夹具」的测试子集：只依赖 %TEMP% 沙箱与系统
+# PowerShell，不含本机绝对路径/用户名/私有目录；入口见 package.json 的 scripts.test，
+# 在 Windows CI 上跑。
 
-# ── 端到端运行器 / 定向验证脚手架 / 源码哈希基线（同上，仅本地）──
-# _*.js         定向 HTTP 验证与工具脚手架（_verify_http_gate.js / _baseline-rules.js 等）
-# _*.txt        上述脚手架写出的结果快照（_verify_diskmap.txt / _verify_baseline_cov.txt）
-# tests/        e2e 运行器（run-tests.js）、夹具（fixture.js）与 regenerate-baseline.js
-# baseline.json 由 tests\regenerate-baseline.js 本地生成，含本机源码哈希
+# ── 定向验证脚手架 / 探针：仅本地（2026-09-26 起统一收纳进 tools/）──
+# tools/_*.js            定向 HTTP 验证与探针（_verify_http_gate.js / _probe_delete_perf.js 等）
+# tools/_*.txt           上述脚本写出的结果快照（_verify_diskmap.txt / _verify_baseline_cov.txt）
+# tools/_*_results.json  同上
+# tools/_shim_childio.js 受限环境下的 IO 转接层：只为本机沙箱服务，进仓库的测试子集不依赖它
+# 下列 `_*` 模式没有前导斜杠，在任意层级都生效，因此 tools/ 下同样被忽略。
 _*.js
 _*.txt
 _*_results.json
 _http_gate_results.json
-tests/
+
+# ── 端到端运行器：源码随仓库分发，产物与本机基线仍忽略（长期-1 + 遗留-30/31）──
+# 放行 run-tests.js / regenerate-baseline.js / fixture.js：三者只依赖 %TEMP% 沙箱与系统
+# PowerShell，路径全部以 __dirname 为锚点、与 cwd 解耦，不含本机路径或用户名。
+# 忽略 baseline.json（含本机源码哈希）、前后状态与运行结果、日志。
+tests/*
+!tests/run-tests.js
+!tests/regenerate-baseline.js
+!tests/fixture.js
+tests/baseline.json
+tests/baseline.json.from-old-space.bak
+tests/*-state.json
+tests/test-results.json
+tests/*.log
 baseline.json
 
 # ── 工作空间本地目录（不随仓库分发）──

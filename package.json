@@ -1,0 +1,14 @@
+{
+  "name": "memory-cleaner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows 本机内存/磁盘清理助手：零依赖 Node HTTP 服务 + 单文件 HTML 界面",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"server/services/__tests__/*.test.js\"",
+    "verify": "node --check server/server.js && node --check launcher.js && node --check cli.js && node --check build.js && npm test"
+  }
+}

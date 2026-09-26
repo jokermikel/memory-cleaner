@@ -1,0 +1,25 @@
+name: CI
+
+# 长期-1（遗留-2 的门禁项）：把验证能力纳入仓库。
+# 只在 Windows 上跑 —— 本项目是 Windows 专用工具，采集/清理依赖 PowerShell 5.1、
+# WMI/CIM、taskkill 与 junction，Linux/macOS runner 上没有任何一项可验证。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 测试入口用的是 node --test 的 glob 形式，需要 Node 21+（本项目运行期只要求 18+）
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 基于夹具的单元测试子集：全部落在 %TEMP% 沙箱内，不写仓库工作区
+      - name: 单元测试
+        run: npm test
