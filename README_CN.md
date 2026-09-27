@@ -306,7 +306,7 @@ node tests\run-tests.js             # 全量端到端（只打 %TEMP% 沙箱，�
 
 - 运行时快照 `data/snapshot.json` 与生成界面 `内存清理助手.html` 含本机真实进程清单与用户名，已由 `.gitignore` 排除，**不会上传到仓库**。
 - 审计日志（`logs/`、`*.log`）与带时间戳的工具备份（`*.2026-*-*Z`）同样排除。
-- 单元测试子集（`server/services/__tests__/`）已**脱敏后随仓库分发**：只依赖 `%TEMP%` 沙箱与系统 PowerShell，不含本机绝对路径、用户名与私有目录，可在任意 Windows 机器上 `npm test` 复跑。反过来，端到端运行器（`tests/`）、根目录定向脚本（`_*.js`）与 `baseline.json` 含本机路径与进程清单，仍由 `.gitignore` 排除。
+- 单元测试子集（`server/services/__tests__/`）已**脱敏后随仓库分发**：只依赖 `%TEMP%` 沙箱与系统 PowerShell，不含本机绝对路径、用户名与私有目录，可在任意 Windows 机器上 `npm test` 复跑。反过来，端到端运行器（`tests/`）、定向脚本（`tools\` 下的 `_*.js`）与 `baseline.json` 含本机路径与进程清单，仍由 `.gitignore` 排除。
 - 本项目零依赖、无项目密钥；服务仅监听 `127.0.0.1`，不对外暴露。访问控制见上文「九道安全闸门」第 0 道。
 
 ## 常见问题
@@ -339,8 +339,8 @@ node tests\run-tests.js             # 全量端到端（只打 %TEMP% 沙箱，�
 
 本项目目前没有正式的对外贡献流程；如果你想自行修改，以下几点能少踩坑：
 
-1. 先看 `最终测试报告.md` 与 `改动清单_实施总账.md`，了解既有的安全约束与历史坑
-   （例如 `force` 不能用来放行批量、释放量不能用整机内存差值统计）。
+1. 先看 `最终测试报告.md`、`改动清单_实施总账.md` 与 `遗留.md`，了解既有的安全约束、历史坑
+   与「已决定不做 / 已知限制」的登记（例如 `force` 不能用来放行批量、释放量不能用整机内存差值统计）。
 2. 不要提交运行时产物 —— `data/snapshot.json`、`内存清理助手.html`、`logs/`、`*.log`
    已被 `.gitignore` 排除，请勿 `git add -f`。
 3. 改动后跑一遍测试：`npm test`（等价于 `node --test "server/services/__tests__/*.test.js"`，
@@ -348,6 +348,8 @@ node tests\run-tests.js             # 全量端到端（只打 %TEMP% 沙箱，�
    （四个入口文件的 `node --check` + 单元测试）。CI 在 Windows runner 上跑的就是 `npm test`。
 4. 界面改动请同步改 `_template.html`，再跑 `node build.js` 重新生成单文件界面 ——
    直接改 `内存清理助手.html` 会在下次 build 时被覆盖。
+5. 换行符由根目录 `.gitattributes` 统一：文本一律以 LF 入库，`.bat` / `.cmd` / `.vbs` 保留 CRLF。
+   请勿把整文件改回 CRLF 或做无关的整文件重排 —— 那会让提交内容在不同机器之间不一致。
 
 ## 许可证
 

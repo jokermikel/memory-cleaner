@@ -314,7 +314,7 @@ Commit history and release state are tracked by git (`git log`), not by this doc
 
 - The runtime snapshot `data/snapshot.json` and the generated UI `内存清理助手.html` contain this machine's real process list and username. Both are excluded by `.gitignore` and are **never uploaded**.
 - Audit logs (`logs/`, `*.log`) and timestamped tool backups (`*.2026-*-*Z`) are excluded as well.
-- The unit-test subset (`server/services/__tests__/`) is **desensitised and distributed with the repo**: it only depends on a `%TEMP%` sandbox and the system PowerShell, contains no machine-specific absolute paths, usernames or private directories, and can be rerun on any Windows machine with `npm test`. Conversely, the end-to-end runner (`tests/`), the root-level targeted scripts (`_*.js`) and `baseline.json` contain real paths and process lists and remain excluded by `.gitignore`.
+- The unit-test subset (`server/services/__tests__/`) is **desensitised and distributed with the repo**: it only depends on a `%TEMP%` sandbox and the system PowerShell, contains no machine-specific absolute paths, usernames or private directories, and can be rerun on any Windows machine with `npm test`. Conversely, the end-to-end runner (`tests/`), the targeted scripts under `tools\` (`_*.js`) and `baseline.json` contain real paths and process lists and remain excluded by `.gitignore`.
 - Zero dependencies, no project secrets; the service listens only on `127.0.0.1` and is not exposed externally. See gate 0 in "Nine Safety Gates" above for access control.
 
 ## FAQ
@@ -341,7 +341,8 @@ Commit history and release state are tracked by git (`git log`), not by this doc
 
 There is no formal external contribution process yet. If you want to modify it yourself, these notes will save you some trouble:
 
-1. Read `最终测试报告.md` and `改动清单_实施总账.md` first to learn the existing safety constraints and historical pitfalls
+1. Read `最终测试报告.md`, `改动清单_实施总账.md` and `遗留.md` first to learn the existing safety
+   constraints, historical pitfalls, and the register of "decided against / known limitations"
    (for example: `force` must not be used to allow a batch, and freed memory must not be computed from the whole-machine memory delta).
 2. Do not commit runtime artifacts — `data/snapshot.json`, `内存清理助手.html`, `logs/`, `*.log` are already excluded by `.gitignore`; please do not `git add -f` them.
 3. Run the tests after changes: `npm test` (same as `node --test "server/services/__tests__/*.test.js"`;
@@ -349,6 +350,9 @@ There is no formal external contribution process yet. If you want to modify it y
    `npm run verify` (`node --check` on the four entry points + the unit tests). CI runs exactly `npm test` on a Windows runner.
 4. For UI changes, edit `_template.html` and then run `node build.js` to regenerate the single-file UI —
    editing `内存清理助手.html` directly will be overwritten by the next build.
+5. Line endings are normalised by the root `.gitattributes`: text files are stored as LF, while
+   `.bat` / `.cmd` / `.vbs` keep CRLF. Do not convert whole files back to CRLF or reflow them —
+   that makes the committed content differ between machines.
 
 ## License
 
