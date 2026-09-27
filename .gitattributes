@@ -1,0 +1,10 @@
+# 统一文本换行符的入库形态：仓库内一律 LF，不再依赖各人 core.autocrlf。
+# 背景：维护机 core.autocrlf=true，服务层多个文件的工作树已出现 mixed 换行；
+# 显式声明后，任何人在任何平台检出/提交都得到一致结果。
+* text=auto eol=lf
+
+# Windows 脚本保持 CRLF：cmd.exe 对 LF 结尾的 .bat/.cmd 在标签跳转等分支上
+# 行为不可靠；.vbs 由 wscript 直接执行，同样按 Windows 原生换行处理。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
