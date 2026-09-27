@@ -264,14 +264,14 @@ npm test          # same as: node --test "server/services/__tests__/*.test.js"
 
 Node 24 requires the `*.test.js` glob; passing just the directory fails.
 
-The end-to-end runner (`tests/run-tests.js` + `tests/regenerate-baseline.js` + `tests/fixture.js`) is distributed too: all three only depend on a `%TEMP%` sandbox and the system PowerShell, every path is anchored on `__dirname` (independent of the working directory), and `tests/baseline.json` (which carries machine-specific source hashes) plus the run artefacts stay excluded by `.gitignore`. Generate a local baseline first:
+The end-to-end runner and fixtures (`tests\run-tests.js` + `tests\regenerate-baseline.js` + `tests\fixture.js`) **run on the maintainer's machine only and are not distributed** (the whole `tests\` directory is excluded by `.gitignore`). On the maintainer's machine the order is below; generate the local baseline first:
 
 ```bash
-node tests\regenerate-baseline.js   # build the local baseline (machine-specific hashes, never committed)
+node tests\regenerate-baseline.js   # build the local baseline (machine-specific hashes)
 node tests\run-tests.js             # full end-to-end (touches only the %TEMP% sandbox, spins up port 7799)
 ```
 
-The targeted verification scripts and probes (`_*.js`, `_*_results.json`) now live under `tools\` and still run on the maintainer's machine only, not distributed (the `_*` patterns in `.gitignore` have no leading slash, so they apply at any depth). Below are the test results; full details are in `最终测试报告.md`, kept alongside this README (a historical record — its numbers are not back-filled).
+The targeted verification scripts and probes (`_*.js`, `_*_results.json`) likewise live under `tools\` and run on the maintainer's machine only, not distributed (the `_*` patterns in `.gitignore` have no leading slash, so they apply at any depth). Below are the test results; full details are in `最终测试报告.md`, kept alongside this README (a historical record — its numbers are not back-filled).
 
 ### Completed
 
@@ -286,7 +286,7 @@ The targeted verification scripts and probes (`_*.js`, `_*_results.json`) now li
 | Added: preset cache-directory assessment | H1–H6 checks; live API run: 15 of 20 relocatable, 5 disabled with reasons; ~2 s |
 | **Latest unit tests** | **203/203 passed** (25 suites, 2026-09-26; `npm test`, Node 24.18) |
 | **Latest targeted HTTP tests** | **71/71 passed** (2026-09-26; `node tools\_verify_http_gate.js`, including the long-task section J1–J11) |
-| **Latest end-to-end tests** | **174/174 passed** (T0–T13, 2026-09-26; 367.9 s, run from the repo root via `node tests\run-tests.js`) |
+| **Latest end-to-end tests** | **174/174 passed** (T0–T13, 2026-09-26; 367.9 s, run on the maintainer's machine via `node tests\run-tests.js`; that runner is not distributed) |
 | **Delete-performance benchmark** | Fit: **fixed 373 ms + 0.4 ms per file** (1–2000 files); **max event-loop lag 14 ms** during deletion; probe `tools\_probe_delete_perf.js` |
 | **Real-environment verification** | Controlled real cache relocation + rollback **29/29** (Edge cache, 1302 files / 367 MB, byte-identical per-file SHA256 restore) · Real user-directory deletion + full restore **23/23** · UI click acceptance **18/18** |
 
@@ -314,7 +314,7 @@ Commit history and release state are tracked by git (`git log`), not by this doc
 
 - The runtime snapshot `data/snapshot.json` and the generated UI `内存清理助手.html` contain this machine's real process list and username. Both are excluded by `.gitignore` and are **never uploaded**.
 - Audit logs (`logs/`, `*.log`) and timestamped tool backups (`*.2026-*-*Z`) are excluded as well.
-- The unit-test subset (`server/services/__tests__/`) is **desensitised and distributed with the repo**: it only depends on a `%TEMP%` sandbox and the system PowerShell, contains no machine-specific absolute paths, usernames or private directories, and can be rerun on any Windows machine with `npm test`. Conversely, the end-to-end runner (`tests/`), the targeted scripts under `tools\` (`_*.js`) and `baseline.json` contain real paths and process lists and remain excluded by `.gitignore`.
+- The unit-test subset (`server/services/__tests__/`) is **desensitised and distributed with the repo**: it only depends on a `%TEMP%` sandbox and the system PowerShell, contains no machine-specific absolute paths, usernames or private directories, and can be rerun on any Windows machine with `npm test`. Conversely, the end-to-end runner and fixtures (`tests/`), the targeted scripts under `tools\` (`_*.js`), the machine-local baseline (`baseline.json`) and the legacy register (`遗留.md`, which carries machine-specific paths and measurements) are **all not distributed** and are excluded by `.gitignore`.
 - Zero dependencies, no project secrets; the service listens only on `127.0.0.1` and is not exposed externally. See gate 0 in "Nine Safety Gates" above for access control.
 
 ## FAQ
@@ -341,8 +341,7 @@ Commit history and release state are tracked by git (`git log`), not by this doc
 
 There is no formal external contribution process yet. If you want to modify it yourself, these notes will save you some trouble:
 
-1. Read `最终测试报告.md`, `改动清单_实施总账.md` and `遗留.md` first to learn the existing safety
-   constraints, historical pitfalls, and the register of "decided against / known limitations"
+1. Read `最终测试报告.md` and `改动清单_实施总账.md` first to learn the existing safety constraints and historical pitfalls
    (for example: `force` must not be used to allow a batch, and freed memory must not be computed from the whole-machine memory delta).
 2. Do not commit runtime artifacts — `data/snapshot.json`, `内存清理助手.html`, `logs/`, `*.log` are already excluded by `.gitignore`; please do not `git add -f` them.
 3. Run the tests after changes: `npm test` (same as `node --test "server/services/__tests__/*.test.js"`;

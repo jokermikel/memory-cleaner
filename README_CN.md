@@ -258,14 +258,14 @@ npm test          # 等价于 node --test "server/services/__tests__/*.test.js"
 
 Node 24 必须带 `*.test.js` 通配符，只传目录会失败。
 
-端到端运行器（`tests/run-tests.js` + `tests/regenerate-baseline.js` + `tests/fixture.js`）也已随仓库分发：三者只依赖 `%TEMP%` 沙箱与系统 PowerShell，路径全部以 `__dirname` 为锚点（与工作目录解耦），含本机源码哈希的 `tests/baseline.json` 与运行产物仍被 `.gitignore` 排除。首次复跑需先生成本地基线：
+端到端运行器与夹具（`tests\run-tests.js` + `tests\regenerate-baseline.js` + `tests\fixture.js`）**只在维护者本机运行，不随仓库分发**（`tests\` 整个目录已由 `.gitignore` 排除）。维护者本机复跑顺序如下，首次需先生成本地基线：
 
 ```bash
-node tests\regenerate-baseline.js   # 生成本机基线（含本机源码哈希，不进仓库）
+node tests\regenerate-baseline.js   # 生成本机基线（含本机源码哈希）
 node tests\run-tests.js             # 全量端到端（只打 %TEMP% 沙箱，自建 7799 端口）
 ```
 
-定向验证脚本与探针（`_*.js`、`_*_results.json`）统一收纳在 `tools\` 下，仍只在本机运行、不随仓库分发（`.gitignore` 的 `_*` 模式无前导斜杠，在任意层级都生效）。以下是测试结论；完整明细见与本文档同目录的 `最终测试报告.md`（历史过程记录，数字不回填）。
+定向验证脚本与探针（`_*.js`、`_*_results.json`）同样统一收纳在 `tools\` 下、只在本机运行、不随仓库分发（`.gitignore` 的 `_*` 模式无前导斜杠，在任意层级都生效）。以下是测试结论；完整明细见与本文档同目录的 `最终测试报告.md`（历史过程记录，数字不回填）。
 
 ### 已完成
 
@@ -280,7 +280,7 @@ node tests\run-tests.js             # 全量端到端（只打 %TEMP% 沙箱，�
 | 新增：预置缓存目录筛选 | H1~H6 检查；真实接口实测 20 条中 15 条可迁移、5 条禁用并说明原因；约 2 秒 |
 | **最新单元测试** | **203/203 通过**（25 套件，2026-09-26；`npm test`，Node 24.18） |
 | **最新定向 HTTP 测试** | **71/71 通过**（2026-09-26；`node tools\_verify_http_gate.js`，含长任务 J1~J11 段） |
-| **最新端到端测试** | **174/174 通过**（T0~T13，2026-09-26；367.9 秒，从仓库根执行 `node tests\run-tests.js`） |
+| **最新端到端测试** | **174/174 通过**（T0~T13，2026-09-26；367.9 秒，维护者本机执行 `node tests\run-tests.js`；该运行器不随仓库分发） |
 | **删除性能实测** | 拟合 **固定 373ms + 0.4ms/文件**（1~2000 文件）；删除期间**事件循环最大延迟 14ms**；探针 `tools\_probe_delete_perf.js` |
 | **真实环境验证** | 受控真实缓存迁移+回滚 **29/29**（Edge 缓存 1302 文件 / 367MB，逐文件 SHA256 复原一致）· 真实用户目录删除+完整复原 **23/23** · 界面点击验收 **18/18** |
 
@@ -306,7 +306,7 @@ node tests\run-tests.js             # 全量端到端（只打 %TEMP% 沙箱，�
 
 - 运行时快照 `data/snapshot.json` 与生成界面 `内存清理助手.html` 含本机真实进程清单与用户名，已由 `.gitignore` 排除，**不会上传到仓库**。
 - 审计日志（`logs/`、`*.log`）与带时间戳的工具备份（`*.2026-*-*Z`）同样排除。
-- 单元测试子集（`server/services/__tests__/`）已**脱敏后随仓库分发**：只依赖 `%TEMP%` 沙箱与系统 PowerShell，不含本机绝对路径、用户名与私有目录，可在任意 Windows 机器上 `npm test` 复跑。反过来，端到端运行器（`tests/`）、定向脚本（`tools\` 下的 `_*.js`）与 `baseline.json` 含本机路径与进程清单，仍由 `.gitignore` 排除。
+- 单元测试子集（`server/services/__tests__/`）已**脱敏后随仓库分发**：只依赖 `%TEMP%` 沙箱与系统 PowerShell，不含本机绝对路径、用户名与私有目录，可在任意 Windows 机器上 `npm test` 复跑。反过来，端到端运行器与夹具（`tests/`）、定向脚本（`tools\` 下的 `_*.js`）、本机哈希基线（`baseline.json`）以及遗留登记册（`遗留.md`，含本机路径与实测数字）**均不随仓库分发**，由 `.gitignore` 排除。
 - 本项目零依赖、无项目密钥；服务仅监听 `127.0.0.1`，不对外暴露。访问控制见上文「九道安全闸门」第 0 道。
 
 ## 常见问题
@@ -339,8 +339,8 @@ node tests\run-tests.js             # 全量端到端（只打 %TEMP% 沙箱，�
 
 本项目目前没有正式的对外贡献流程；如果你想自行修改，以下几点能少踩坑：
 
-1. 先看 `最终测试报告.md`、`改动清单_实施总账.md` 与 `遗留.md`，了解既有的安全约束、历史坑
-   与「已决定不做 / 已知限制」的登记（例如 `force` 不能用来放行批量、释放量不能用整机内存差值统计）。
+1. 先看 `最终测试报告.md` 与 `改动清单_实施总账.md`，了解既有的安全约束与历史坑
+   （例如 `force` 不能用来放行批量、释放量不能用整机内存差值统计）。
 2. 不要提交运行时产物 —— `data/snapshot.json`、`内存清理助手.html`、`logs/`、`*.log`
    已被 `.gitignore` 排除，请勿 `git add -f`。
 3. 改动后跑一遍测试：`npm test`（等价于 `node --test "server/services/__tests__/*.test.js"`，

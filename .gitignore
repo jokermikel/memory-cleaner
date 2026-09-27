@@ -17,12 +17,14 @@ README.old.md
 PROGRESS.md
 内存清理应用_实施计划.md
 磁盘清理模块_实施计划.md
-# 本轮全量分析、执行计划与安全复审报告：含本机绝对路径与真实进程/路径细节，
-# 与 最终测试报告.md / 改动清单_实施总账.md 不同——那两份是面向仓库的结论，
-# 这三份是定位到本机现场的原始过程材料，一律不上传。
+# 本轮全量分析、执行计划与安全复审报告：含本机绝对路径与真实进程/路径细节，一律不上传。
+# 与 最终测试报告.md / 改动清单_实施总账.md 不同——那两份是面向仓库的结论。
 建议.md
 下一步.md
 项目安全与质量复审报告_20260924_修正版.md
+# 遗留登记册：逐条登记「未做 / 不实施 / 已知限制 / 已解决去向」及其证据，
+# 含本机路径与实测数字，按维护者决定不随仓库分发（2026-09-27）。
+遗留.md
 
 # ── 依赖与缓存 ──
 node_modules/
@@ -54,19 +56,11 @@ _*.txt
 _*_results.json
 _http_gate_results.json
 
-# ── 端到端运行器：源码随仓库分发，产物与本机基线仍忽略（长期-1 + 遗留-30/31）──
-# 放行 run-tests.js / regenerate-baseline.js / fixture.js：三者只依赖 %TEMP% 沙箱与系统
-# PowerShell，路径全部以 __dirname 为锚点、与 cwd 解耦，不含本机路径或用户名。
-# 忽略 baseline.json（含本机源码哈希）、前后状态与运行结果、日志。
-tests/*
-!tests/run-tests.js
-!tests/regenerate-baseline.js
-!tests/fixture.js
-tests/baseline.json
-tests/baseline.json.from-old-space.bak
-tests/*-state.json
-tests/test-results.json
-tests/*.log
+# ── 端到端运行器与夹具：仅本地，不随仓库分发（2026-09-27 起撤回分发）──
+# run-tests.js / regenerate-baseline.js / fixture.js，以及本地基线 baseline.json、
+# 前后状态、运行结果与日志，整目录排除；本地文件保留不动。
+# 仓库对外的测试只有 server/services/__tests__/，CI 跑的也是它。
+tests/
 baseline.json
 
 # ── 工作空间本地目录（不随仓库分发）──
