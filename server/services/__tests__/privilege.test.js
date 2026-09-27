@@ -81,17 +81,17 @@ test('buildElevateCommand 含 RunAs，路径带空格也不拆', () => {
 test('buildElevateSpawn 走 wscript + elevate.vbs，路径原样传入', () => {
   const spec = buildElevateSpawn({
     nodeExe: 'C:\\Program Files\\nodejs\\node.exe',
-    launcher: 'D:\\清理\\launcher.js',
-    workDir: 'D:\\清理',
+    launcher: 'D:\\用户目录\\launcher.js',
+    workDir: 'D:\\用户目录',
     replacePid: 4321
   });
   assert.ok(spec.file.toLowerCase().endsWith('wscript.exe'));
   assert.strictEqual(spec.args.length, 4);
   assert.ok(spec.args[0].toLowerCase().endsWith('elevate.vbs'));
   assert.strictEqual(spec.args[1], 'C:\\Program Files\\nodejs\\node.exe');
-  assert.strictEqual(spec.args[2], 'D:\\清理\\launcher.js');
+  assert.strictEqual(spec.args[2], 'D:\\用户目录\\launcher.js');
   assert.strictEqual(spec.args[3], '4321');
-  assert.strictEqual(spec.cwd, 'D:\\清理');
+  assert.strictEqual(spec.cwd, 'D:\\用户目录');
 });
 
 test('本机存在 wscript.exe 和 elevate.vbs', () => {
